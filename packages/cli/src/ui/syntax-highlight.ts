@@ -1,58 +1,55 @@
-// @x-code-cli/cli — Per-line syntax highlighter for the diff renderer.
+// @x-code-cli/cli - 按行工作的语法高亮器，供 diff renderer 使用。
 //
-// Why in-house: every off-the-shelf Node terminal highlighter we looked
-// at (cli-highlight, chalk-highlight, etc.) either pulls in highlight.js
-// (~600KB) or hasn't seen a release in years. The diff use case here is
-// narrow — we only highlight ~60 lines per diff, on a dark bg, and we
-// only need to recognize the common token classes. ~150 lines of regex
-// gives us 80% of the visual benefit at 0.1% of the dep weight.
+// 为什么要自研：我们看过的现成 Node 终端高亮库（cli-highlight、
+// chalk-highlight 等）要么会引入 highlight.js（大约 600KB），要么
+// 已经很多年没有更新了。这里的 diff 场景其实很窄 - 我们每次只需要
+// 高亮大约 60 行、背景还是深色，而且只要识别常见 token 类别就够了。
+// 用约 150 行正则，就能换来大约 80% 的视觉收益，但依赖体积只有
+// 它的 0.1%。
 //
-// Per-LINE: the highlighter takes one diff line at a time. That means
-// we lose state across lines (block comments split by a hunk boundary
-// won't keep highlighting through context rows), but it matches how
-// Claude Code's StructuredDiff fallback renders too — each line is its
-// own React node. For the diff use case that limitation is invisible
-// in practice: a hunk's context window is 3 lines, and you very rarely
-// get a `/* ... */` straddling exactly those lines.
+// 按“行”处理：这个高亮器一次只吃一行 diff。代价是失去跨行状态
+// （比如被 hunk 边界切开的块注释，不能一路延续到后面的上下文行），
+// 但 Claude Code 的 StructuredDiff fallback 也是这样 - 每一行都只是
+// 一个独立的 React node。对 diff 场景来说，这个限制在实践里几乎看不见：
+// 一个 hunk 的 context window 只有 3 行，而且你很少会刚好碰到 `/* ... */`
+// 精准跨过这几行的情况。
 //
-// Theme system: a small set of named palettes (one-dark, monokai,
-// dracula, github-dark, solarized-dark, ansi, off). The active palette
-// is held in a module-level ref initialized from `~/.x-code/config.json`
-// at startup and flipped at runtime by `/syntax <name>`. Any rendering
-// path that wants the current palette calls `highlightLine` with no
-// theme arg — that picks up the live module ref. Tests and previews
-// can pass an explicit theme to bypass the global.
+// 主题系统：一小组命名调色板（one-dark、monokai、dracula、github-dark、
+// solarized-dark、ansi、off）。当前调色板保存在模块级引用里，启动时从
+// `~/.x-code/config.json` 初始化，运行时则由 `/syntax <name>` 切换。
+// 任何想使用当前调色板的渲染路径，都直接调用不带 theme 参数的
+// `highlightLine` - 它会读取这个实时的模块级引用。测试和预览则可以
+// 显式传入主题，绕开全局状态。
 import { Chalk } from 'chalk'
 
 const c = new Chalk({ level: 3 })
 
-// ─── Themes ───
+// ─── 主题 ───
 
-/** Token kinds the highlighter emits. Each theme maps these to colors.
+/** 高亮器会产出的 token 类别。每个主题都会把这些类别映射成颜色。
  *
- *  `storage` is split from `keyword` to match CC / syntect's convention:
- *  control-flow keywords (`if`, `return`, `throw`) use `keyword`, while
- *  declaration keywords (`const`, `let`, `function`, `class`, `interface`)
- *  use `storage`. In Monokai these come out as hot-pink and cyan
- *  respectively — without the split, `function` ends up the same color
- *  as `if`, which doesn't match CC. See CC color-diff/index.ts:248-265. */
+ *  `storage` 从 `keyword` 里单独拆出来，是为了对齐 CC / syntect 的
+ *  约定：控制流关键字（`if`、`return`、`throw`）归到 `keyword`，
+ *  而声明型关键字（`const`、`let`、`function`、`class`、`interface`）
+ *  归到 `storage`。在 Monokai 里它们分别会显示成热粉和青色 - 如果不
+ *  拆分，`function` 就会和 `if` 变成同一个颜色，这就不符合 CC 了。
+ *  参考 CC color-diff/index.ts:248-265。 */
 type Token = 'keyword' | 'storage' | 'type' | 'string' | 'number' | 'comment' | 'function' | 'literal'
 
-/** Palette: a color (hex `#rrggbb`, ANSI name like `'magenta'`, or `null`
- *  to mean "leave fg alone — use terminal default"). Null is the trick
- *  that lets the `'off'` theme pass tokens through unchanged without
- *  needing a separate code path. */
+/** 调色板：颜色值可以是 hex（`#rrggbb`）、ANSI 名称（比如 `'magenta'`），
+ *  或者 `null`（表示“不要改前景色 - 直接用终端默认值”）。
+ *  正是 `null` 让 `'off'` 主题能够在不单独分支的情况下，把 token 原样
+ *  放过去。 */
 type ColorSpec = string | null
 type Palette = Record<Token, ColorSpec>
 
-/** Built-in syntax themes. Names are lowercase-kebab. `'off'` is a real
- *  entry — it disables every paint() call by setting every color to
- *  null.
+/** 内置语法主题。名字都是小写 kebab-case。`'off'` 是一个真实条目 -
+ *  它会把所有颜色都设成 null，从而让每一次 paint() 调用都失效。
  *
- *  Two palettes are CC-derived: `monokai` (CC's "Monokai Extended" —
- *  bundled with all dark `/theme` modes) and `github-light` (CC's
- *  "GitHub" — bundled with all light `/theme` modes). The other names
- *  predate the CC parity work. */
+ *  其中有两个调色板直接来源于 CC：`monokai`（CC 的 "Monokai Extended"，
+ *  会随所有深色 `/theme` 模式一起提供）和 `github-light`
+ *  （CC 的 "GitHub"，会随所有浅色 `/theme` 模式一起提供）。
+ *  其余名字则早于 CC 对齐工作。 */
 export type SyntaxThemeName =
   | 'one-dark'
   | 'monokai'
@@ -64,93 +61,95 @@ export type SyntaxThemeName =
   | 'off'
 
 const THEMES: Record<SyntaxThemeName, Palette> = {
-  // One Dark — Atom's signature theme. Calm, well-balanced contrast on
-  // dark bg. Good default for most users.
+  // One Dark - Atom 的标志性主题。深色背景下对比度平稳、均衡，
+  // 对大多数用户来说都是很稳妥的默认选择。
   'one-dark': {
-    keyword: '#c678dd', // purple
-    storage: '#c678dd', // purple — One Dark groups storage with keyword
-    type: '#e5c07b', // sand yellow
-    string: '#98c379', // mossy green
-    number: '#d19a66', // warm orange
-    comment: '#7f848e', // dim cool gray
-    function: '#61afef', // light blue
-    literal: '#d19a66', // orange (same family as numbers)
+    keyword: '#c678dd', // 紫色
+    storage: '#c678dd', // 紫色 - One Dark 把 storage 和 keyword 放在一起
+    type: '#e5c07b', // 砂黄色
+    string: '#98c379', // 苔绿色
+    number: '#d19a66', // 温暖的橙色
+    comment: '#7f848e', // 冷调灰色
+    function: '#61afef', // 浅蓝
+    literal: '#d19a66', // 橙色（和 number 属于同一色系）
   },
-  // Monokai — Sublime Text's classic. Punchy, high-saturation. Values
-  // match CC's MONOKAI_SCOPES (native-ts/color-diff/index.ts:190-215)
-  // byte-for-byte so dark-mode diffs render with the same syntax
-  // colors as Claude Code's "Monokai Extended" syntect theme.
+  // Monokai - Sublime Text 的经典主题。饱和度高、非常有冲击力。
+  // 这些值与 CC 的 MONOKAI_SCOPES（native-ts/color-diff/index.ts:190-215）
+  // 完全一致，这样深色模式下的 diff 就能和 Claude Code 的
+  // "Monokai Extended" syntect 主题渲染出同样的语法颜色。
   monokai: {
-    keyword: '#f92672', // hot pink — control keywords (if/return/throw)
-    storage: '#66d9ef', // cyan — declaration keywords (const/let/function/class)
-    type: '#a6e22e', // chartreuse — types, built-ins
-    string: '#e6db74', // muted yellow
-    number: '#be84ff', // pastel purple — numbers/literals (CC rgb 190,132,255)
-    comment: '#75715e', // brown-gray
-    function: '#a6e22e', // chartreuse — function/class titles (CC groups w/ types)
-    literal: '#be84ff', // pastel purple
+    keyword: '#f92672', // 热粉 - 控制流关键字（if/return/throw）
+    storage: '#66d9ef', // 青色 - 声明型关键字（const/let/function/class）
+    type: '#a6e22e', // 黄绿色 - 类型、内建对象
+    string: '#e6db74', // 柔和黄
+    number: '#be84ff', // 淡紫 - 数字 / 字面量（CC rgb 190,132,255）
+    comment: '#75715e', // 棕灰
+    function: '#a6e22e', // 黄绿色 - 函数 / 类名标题（CC 会和 types 放一起）
+    literal: '#be84ff', // 淡紫
   },
-  // Dracula — popular dark theme with a pastel palette.
+  // Dracula - 很受欢迎的深色主题，走的是柔和的粉彩路线。
   dracula: {
-    keyword: '#ff79c6', // pink
-    storage: '#ff79c6', // pink — Dracula groups storage with keyword
-    type: '#8be9fd', // cyan
-    string: '#f1fa8c', // pale yellow
-    number: '#bd93f9', // lavender
-    comment: '#6272a4', // blue-gray
-    function: '#50fa7b', // mint green
-    literal: '#bd93f9', // lavender
+    keyword: '#ff79c6', // 粉色
+    storage: '#ff79c6', // 粉色 - Dracula 也把 storage 和 keyword 归一起
+    type: '#8be9fd', // 青蓝
+    string: '#f1fa8c', // 淡黄
+    number: '#bd93f9', // 薰衣草紫
+    comment: '#6272a4', // 蓝灰
+    function: '#50fa7b', // 薄荷绿
+    literal: '#bd93f9', // 薰衣草紫
   },
-  // GitHub Dark — matches GitHub.com's dark-mode code blocks.
+  // GitHub Dark - 对齐 GitHub.com 深色模式下的代码块。
   'github-dark': {
-    keyword: '#ff7b72', // salmon
-    storage: '#ff7b72', // salmon
-    type: '#ffa657', // orange
-    string: '#a5d6ff', // light blue
-    number: '#79c0ff', // blue
-    comment: '#8b949e', // gray
-    function: '#d2a8ff', // lavender
-    literal: '#79c0ff', // blue
+    keyword: '#ff7b72', // 鲑红
+    storage: '#ff7b72', // 鲑红
+    type: '#ffa657', // 橙色
+    string: '#a5d6ff', // 浅蓝
+    number: '#79c0ff', // 蓝色
+    comment: '#8b949e', // 灰色
+    function: '#d2a8ff', // 薰衣草紫
+    literal: '#79c0ff', // 蓝色
   },
-  // GitHub Light — values match CC's GITHUB_SCOPES (native-ts/color-diff/
-  // index.ts:218-243) byte-for-byte. Tuned for LIGHT terminals: deep
-  // saturated colors that read well on white. Bundled with the
-  // light / light-daltonized /theme modes.
+  // GitHub Light - 数值与 CC 的 GITHUB_SCOPES
+  // （native-ts/color-diff/index.ts:218-243）逐字节一致。它是为浅色
+  // 终端调的：颜色更深、更饱和，在白底上读起来更清楚。会随
+  // light / light-daltonized /theme 模式一起提供。
   'github-light': {
-    keyword: '#a71d5d', // deep magenta — control keywords
-    storage: '#a71d5d', // deep magenta — GitHub groups storage with keyword
-    type: '#0086b3', // teal — types, built-ins, numbers, literals
-    string: '#183691', // navy — strings
-    number: '#0086b3', // teal
-    comment: '#969896', // medium gray
-    function: '#795da3', // purple — function/class titles
-    literal: '#0086b3', // teal
+    keyword: '#a71d5d', // 深洋红 - 控制流关键字
+    storage: '#a71d5d', // 深洋红 - GitHub 也把 storage 和 keyword 放一起
+    type: '#0086b3', // 青绿 - 类型、内建、数字、字面量
+    string: '#183691', // 海军蓝 - 字符串
+    number: '#0086b3', // 青绿
+    comment: '#969896', // 中灰
+    function: '#795da3', // 紫色 - 函数 / 类名标题
+    literal: '#0086b3', // 青绿
   },
-  // Solarized Dark — Ethan Schoonover's much-imitated low-contrast theme.
+  // Solarized Dark - Ethan Schoonover 的经典低对比度主题，后来的很多
+  // 主题都受它影响。
   'solarized-dark': {
-    keyword: '#859900', // moss green
-    storage: '#cb4b16', // burnt orange — separates declarations
-    type: '#b58900', // gold
-    string: '#2aa198', // teal
-    number: '#d33682', // magenta
-    comment: '#586e75', // slate
-    function: '#268bd2', // blue
-    literal: '#d33682', // magenta
+    keyword: '#859900', // 苔绿
+    storage: '#cb4b16', // 烧橙 - 用来区分声明
+    type: '#b58900', // 金色
+    string: '#2aa198', // 青绿
+    number: '#d33682', // 品红
+    comment: '#586e75', // 石板灰
+    function: '#268bd2', // 蓝色
+    literal: '#d33682', // 品红
   },
-  // ANSI — uses the terminal's 16-color palette (named chalk colors).
-  // Looks correct everywhere, even dumb terminals; trades fidelity for
-  // compatibility. Values are byte-aligned to CC's `ANSI_SCOPES` (color-
-  // diff/index.ts:267-280): every entry uses `ansiIdx(N)` with N in
-  // 10-14, i.e. the BRIGHT palette half. We previously used the normal
-  // 0-7 names which made our ANSI mode look noticeably dimmer / less
-  // saturated than CC's. Mapping:
+  // ANSI - 直接使用终端的 16 色调色板（Chalk 的命名颜色）。
+  // 这种模式在任何地方都能看起来“合理”，哪怕是很简陋的终端；
+  // 代价是牺牲一些色彩保真度来换兼容性。这里的值和 CC 的
+  // `ANSI_SCOPES`（color-diff/index.ts:267-280）逐字节对齐：
+  // 每一项都使用 `ansiIdx(N)`，其中 N 在 10-14 之间，也就是
+  // BRIGHT 调色板那一半。我们之前用的是普通的 0-7 名称，
+  // 这会让我们的 ANSI 模式看起来比 CC 明显更暗、饱和度更低。
+  // 映射关系：
   //   keyword         = ansiIdx(13) = bright magenta
   //   _storage        = ansiIdx(14) = bright cyan
   //   built_in / type = ansiIdx(14) = bright cyan
   //   string          = ansiIdx(10) = bright green
   //   number / literal = ansiIdx(12) = bright blue
   //   title.function  = ansiIdx(11) = bright yellow
-  //   comment         = ansiIdx(8)  = bright black (chalk `gray`)
+  //   comment         = ansiIdx(8)  = bright black（chalk 的 `gray`）
   ansi: {
     keyword: 'magentaBright',
     storage: 'cyanBright',
@@ -161,9 +160,9 @@ const THEMES: Record<SyntaxThemeName, Palette> = {
     function: 'yellowBright',
     literal: 'blueBright',
   },
-  // Off — every token color is null so paint() is an identity. This
-  // keeps the hot path branchless: the rule loop still runs (cheap on
-  // ~60-line inputs), it just doesn't insert any escape codes.
+  // Off - 每个 token 颜色都是 null，所以 paint() 会退化成恒等函数。
+  // 这样热路径就不需要额外分支：规则循环照样跑（对 ~60 行输入来说
+  // 代价很小），只是不会插入任何 escape code。
   off: {
     keyword: null,
     storage: null,
@@ -176,8 +175,8 @@ const THEMES: Record<SyntaxThemeName, Palette> = {
   },
 }
 
-/** Display labels for the picker. Order is intentional — sorted by
- *  popularity so the first row of the picker is the most common pick. */
+/** 给 picker 用的展示文案。顺序是有意安排的 - 按常用程度排序，
+ *  这样 picker 的第一行就是最常见的选择。 */
 export const SYNTAX_THEME_DESCRIPTIONS: { name: SyntaxThemeName; label: string; description: string }[] = [
   { name: 'one-dark', label: 'One Dark', description: 'Atom signature — calm, balanced contrast (default)' },
   { name: 'monokai', label: 'Monokai', description: 'Sublime classic — punchy, high saturation' },
@@ -190,9 +189,9 @@ export const SYNTAX_THEME_DESCRIPTIONS: { name: SyntaxThemeName; label: string; 
 
 export const DEFAULT_SYNTAX_THEME: SyntaxThemeName = 'one-dark'
 
-/** Active theme — read by `highlightLine` when no explicit theme arg is
- *  passed. Initialized to default; flipped by `setSyntaxTheme` on
- *  startup (from user config) and again when the user runs `/syntax`. */
+/** 当前激活的主题 - 当 `highlightLine` 没有显式传入 theme 参数时会
+ *  读取它。启动时（从用户配置）初始化为默认值，用户运行 `/syntax`
+ *  时也会再次切换。 */
 let currentTheme: SyntaxThemeName = DEFAULT_SYNTAX_THEME
 
 export function setSyntaxTheme(name: SyntaxThemeName): void {
@@ -203,17 +202,16 @@ export function getSyntaxTheme(): SyntaxThemeName {
   return currentTheme
 }
 
-/** Validate / coerce an arbitrary string into a SyntaxThemeName. Used
- *  when reading user config (which is `unknown`-typed) and parsing
- *  slash-command arguments. Returns null for anything we don't
- *  recognize so the caller can show a helpful error. */
+/** 验证 / 规整任意字符串，把它转成 SyntaxThemeName。
+ *  用在读取用户配置（它的类型是 `unknown`）以及解析 slash-command
+ *  参数时。任何无法识别的值都会返回 null，方便调用方给出友好的错误。 */
 export function parseSyntaxThemeName(input: unknown): SyntaxThemeName | null {
   if (typeof input !== 'string') return null
   const normalized = input
     .toLowerCase()
     .trim()
     .replace(/[\s_]+/g, '-')
-  // Common alias mappings — matches what users might type.
+  // 常见别名映射 - 对应用户可能真的会输入的写法。
   const aliases: Record<string, SyntaxThemeName> = {
     onedark: 'one-dark',
     one: 'one-dark',
@@ -237,24 +235,23 @@ export function parseSyntaxThemeName(input: unknown): SyntaxThemeName | null {
   return null
 }
 
-// ─── Language detection ───
+// ─── 语言检测 ───
 
-/** Languages we have specific tokenizer rules for. Anything not in this
- *  set falls back to plain text (no highlighting), which is still a
- *  valid render — just less colorful. */
+/** 我们有专门 tokenizer 规则的语言。任何不在这个集合里的内容都会
+ *  回退成纯文本（不高亮），但这仍然是合法渲染 - 只是没那么花哨。 */
 type Lang = 'js' | 'json' | 'html' | 'css' | 'yaml' | 'shell' | 'python' | 'go' | 'rust' | 'md'
 
-/** Single lookup table for both file extensions (used by detectLanguage)
- *  and markdown fence-language identifiers (used by detectFenceLanguage).
- *  Keys are lowercase. Most entries are valid in both contexts (e.g. `ts`,
- *  `py`, `rs`); fence-only aliases like `typescript`, `python`, `golang`,
- *  `rust`, `javascript`, `shell` simply produce no match for file paths
- *  since extensions don't use those forms. Extension-only entries like
- *  `mts` / `cts` similarly produce no match for fences in practice. */
+/** 一张统一的查找表，同时给文件扩展名（detectLanguage 用）和
+ *  markdown fence 的语言标识（detectFenceLanguage 用）服务。
+ *  键全部是小写。大多数条目在两种上下文里都有效（比如 `ts`、
+ *  `py`、`rs`）；只对 fence 有意义的别名像 `typescript`、`python`、
+ *  `golang`、`rust`、`javascript`、`shell`，在文件路径场景里自然
+ *  匹配不到，因为扩展名不会长这样。只对扩展名有意义的条目像 `mts`
+ *  / `cts`，在 fence 里也同样不会有实际匹配。 */
 const LANG_LOOKUP: Record<string, Lang> = {
-  // JS / TS family — share the same tokenizer (TS-isms like `interface`,
-  // `type`, `enum` are treated as keywords; the tokenizer is permissive
-  // by design, false positives in raw JS are not visually offensive).
+  // JS / TS 家族 - 共用同一个 tokenizer（TS 里的 `interface`、`type`、
+  // `enum` 这些语法会被当成关键字；这个 tokenizer 故意做得宽松，
+  // 因为在纯 JS 里出现一点误判，视觉上也不会太刺眼）。
   ts: 'js',
   tsx: 'js',
   typescript: 'js',
@@ -265,9 +262,9 @@ const LANG_LOOKUP: Record<string, Lang> = {
   cjs: 'js',
   mts: 'js',
   cts: 'js',
-  vue: 'js', // Vue SFCs are mostly TS — close enough for diff display
+  vue: 'js', // Vue SFC 大多是 TS - 拿来做 diff 显示已经够接近了
   svelte: 'js',
-  // Data formats
+  // 数据格式
   json: 'json',
   jsonc: 'json',
   json5: 'json',
@@ -279,16 +276,16 @@ const LANG_LOOKUP: Record<string, Lang> = {
   scss: 'css',
   sass: 'css',
   less: 'css',
-  // Config
+  // 配置
   yml: 'yaml',
   yaml: 'yaml',
-  toml: 'yaml', // close enough for diff coloring (key=value, strings, numbers)
+  toml: 'yaml', // 用于 diff 着色已经足够接近（key=value、字符串、数字）
   // Shell
   sh: 'shell',
   bash: 'shell',
   zsh: 'shell',
   shell: 'shell',
-  // Other
+  // 其他
   py: 'python',
   python: 'python',
   go: 'go',
@@ -305,41 +302,41 @@ export function detectLanguage(filePath: string): Lang | null {
   return LANG_LOOKUP[m[1]!.toLowerCase()] ?? null
 }
 
-/** Map a markdown fence-language identifier (the bit after the opening
- *  ``` on a fenced code block) to one of our supported `Lang` values.
- *  Returns null when the fence had no language hint or the language
- *  isn't covered — caller falls back to plain (un-highlighted) text. */
+/** 把 markdown fence 的语言标识（fenced code block 开头 ``` 后面的那段）
+ *  映射成我们支持的 `Lang` 值。
+ *  如果 fence 没写语言，或者这个语言我们不支持，就返回 null -
+ *  调用方会回退到纯文本（不高亮）。 */
 export function detectFenceLanguage(fenceLang: string | undefined): Lang | null {
   if (!fenceLang) return null
   return LANG_LOOKUP[fenceLang.trim().toLowerCase()] ?? null
 }
 
-// ─── Tokenization ───
+// ─── Token 化 ───
 
 interface Rule {
   re: RegExp
   token: Token
 }
 
-/** Build a single sticky regex (`y` flag, anchored at lastIndex) from
- *  the rule set. We try each rule in order at the current position; the
- *  first match wins. Patterns must be authored to avoid catastrophic
- *  backtracking — kept simple and bounded throughout. */
+/** 根据规则集构造一个 sticky regex（带 `y` 标志，锚定在 lastIndex）。
+ *  我们会在当前位置按顺序尝试每条规则，先匹配到的先赢。
+ *  正则模式必须避免灾难性回溯 - 所以整体都尽量保持简单、可控、
+ *  有上界。 */
 function makeRules(rules: { re: RegExp; token: Token }[]): Rule[] {
   return rules.map(({ re, token }) => ({
-    // Force sticky so we can scan position-by-position in the loop below.
-    // The original `re` may already include `y`; if not, recreate it with
-    // the same pattern + sticky flag.
+    // 强制 sticky，这样下面的循环才能按位置一步一步扫描。
+    // 原始 `re` 里可能已经带了 `y`；如果没有，就用相同 pattern
+    // + sticky flag 重新构造一个。
     re: re.flags.includes('y') ? re : new RegExp(re.source, re.flags + 'y'),
     token,
   }))
 }
 
-/** Storage / declaration keywords — render in the `storage` token color
- *  to match CC's `_storage` scope (color-diff/index.ts:248-265). One
- *  global set across languages: hljs / syntect treat these as the same
- *  scope regardless of source language, and the words don't overlap
- *  with anything that needs different coloring. */
+/** storage / 声明关键字 - 统一渲染成 `storage` token 的颜色，
+ *  对齐 CC 的 `_storage` scope（color-diff/index.ts:248-265）。
+ *  这是跨语言共用的一组全局集合：hljs / syntect 会把这些词当成
+ *  同一个 scope，不管源语言是什么，而且这些词也不会和需要不同着色
+ *  的内容重叠。 */
 const STORAGE_KEYWORDS = new Set([
   'const',
   'let',
@@ -359,14 +356,13 @@ const STORAGE_KEYWORDS = new Set([
   'impl',
 ])
 
-/** JS / TS global "support" objects — what hljs scopes as `built_in`
- *  and CC's MONOKAI_SCOPES paints chartreuse green (color-diff/
- *  index.ts:193). Routing these to the `function` palette slot is what
- *  makes `console.log(...)` come out as **green** `console` + plain
- *  `log` — matching CC. Without this, our previous "identifier
- *  followed by `(`" heuristic painted `log` (the method) green and
- *  left `console` (the global) plain, which the user noticed was
- *  the exact inverse of CC. */
+/** JS / TS 的全局“支持”对象 - 对应 hljs 的 `built_in`，
+ *  CC 的 MONOKAI_SCOPES 会把它们画成黄绿色
+ *  （color-diff/index.ts:193）。把这些值路由到 `function`
+ *  调色板槽位，就能让 `console.log(...)` 变成 **绿色** 的 `console`
+ *  + 纯文本的 `log` - 这和 CC 一致。否则我们以前那个“标识符后面
+ *  跟着 `(` 就当函数”的启发式，会把 `log`（方法）涂成绿色，
+ *  而把 `console`（全局对象）留成普通文本，正好和 CC 反过来。 */
 const JS_GLOBALS = new Set([
   'console',
   'globalThis',
@@ -640,45 +636,42 @@ const KEYWORD_RULES: Partial<Record<Lang, { keywords: Set<string>; pascalAsType?
   shell: { keywords: KEYWORDS_SHELL },
 }
 
-// ─── Per-language rule tables ───
+// ─── 各语言规则表 ───
 //
-// Each rule list is tried in order at every byte position. The first
-// rule that matches consumes those characters and emits a colored
-// fragment. Important: comment / string / number rules MUST come before
-// the identifier rule so a string like `"if"` doesn't get its inner
-// `if` highlighted as a keyword.
+// 每一组规则都会在每个字节位置按顺序尝试。第一个匹配的规则会消耗
+// 那些字符，并输出一个带颜色的片段。重要的是：comment / string /
+// number 规则必须排在 identifier 规则前面，否则像 `"if"` 这样的字符串
+// 里的 `if` 就会被错误地当成关键字高亮。
 
 function jsRules(): Rule[] {
   return makeRules([
     { re: /\/\/[^\n]*/, token: 'comment' },
-    // Bounded block comment to keep regex non-catastrophic — anything
-    // over 500 chars on one line is pathological anyway and we'd rather
-    // bail than hang.
+    // 给块注释加上长度上限，避免正则灾难性回溯 - 单行超过 500
+    // 字符的注释本来也很病态，我们宁可直接放弃，也不要卡住。
     { re: /\/\*[\s\S]{0,500}?\*\//, token: 'comment' },
     { re: /"(?:[^"\\\n]|\\.){0,500}"/, token: 'string' },
     { re: /'(?:[^'\\\n]|\\.){0,500}'/, token: 'string' },
     { re: /`(?:[^`\\]|\\.){0,500}`/, token: 'string' },
     { re: /0[xX][0-9a-fA-F]+n?/, token: 'number' },
     { re: /\b\d+(?:\.\d+)?(?:[eE][+-]?\d+)?n?\b/, token: 'number' },
-    // Declaration-name capture: after `function` / `class` / `interface`
-    // / `type` / `enum` / `namespace`, the next identifier is a `title.*`
-    // scope in hljs. We collapse all of them onto the `function` token
-    // because CC's three themes treat `title.function` and `title.class`
-    // identically: monokai chartreuse, ansi bright yellow. (github-light
-    // is the one mismatch — `title.class` is black there but we keep
-    // class names in the `function` slot to stay correct in monokai/ansi
-    // mode where the user sees the difference more sharply.)
+    // 声明名捕获：在 `function` / `class` / `interface` / `type`
+    // / `enum` / `namespace` 后面的下一个标识符，在 hljs 里通常会被
+    // 归到 `title.*` scope。我们把它们统一压到 `function` token 上，
+    // 因为 CC 的三套主题里 `title.function` 和 `title.class` 实际上
+    // 都是同色：monokai 黄绿色，ansi 亮黄。（github-light 是唯一的
+    // 例外 - 那里 `title.class` 是黑色，但我们还是把类名放在
+    // `function` 槽位里，以便在 monokai / ansi 这种用户更容易看出差异
+    // 的模式下保持正确。）
     {
       re: /(?<=\b(?:function|class|interface|type|enum|namespace)\s+)[A-Za-z_$][\w$]*/,
       token: 'function',
     },
-    // Generic identifier — keyword / literal / global / type lookup
-    // happens in paint(). NOTE: we deliberately do NOT have a generic
-    // "identifier followed by `(`" rule here. Per CC's hljs scoping,
-    // method calls like `obj.method(...)` paint `method` as `property`
-    // (= default fg, no color), not as a function name. The previous
-    // heuristic painted `log` chartreuse — flipping the visual against
-    // CC. Function CALLS are now plain by design.
+    // 通用标识符 - keyword / literal / global / type 的分类都在 paint()
+    // 里完成。注意：这里我们故意不放一个“标识符后面跟着 `(` 就算函数”
+    // 的通用规则。按照 CC 的 hljs 语义，像 `obj.method(...)` 里的
+    // `method` 会被画成 `property`（也就是默认前景色、没有颜色），
+    // 而不是函数名。以前那个启发式会把 `log` 涂成黄绿色，视觉上正好
+    // 和 CC 相反。现在函数调用按设计就是纯文本。
     { re: /[A-Za-z_$][\w$]*/, token: 'keyword' },
   ])
 }
@@ -694,11 +687,11 @@ function jsonRules(): Rule[] {
 function htmlRules(): Rule[] {
   return makeRules([
     { re: /<!--[\s\S]{0,500}?-->/, token: 'comment' },
-    // Tag names: `<TagName` and `</TagName`. Yellow.
+    // 标签名：`<TagName` 和 `</TagName`。黄色。
     { re: /<\/?[A-Za-z][\w-]*/, token: 'type' },
     { re: /"(?:[^"\\\n]|\\.){0,500}"/, token: 'string' },
     { re: /'(?:[^'\\\n]|\\.){0,500}'/, token: 'string' },
-    // Attribute names — not perfect (matches loose ids too) but close.
+    // 属性名 - 不算完美（也会匹配一些松散 id），但已经够接近了。
     { re: /\b[a-zA-Z_:][\w:.-]*(?=\s*=)/, token: 'function' },
   ])
 }
@@ -708,12 +701,12 @@ function cssRules(): Rule[] {
     { re: /\/\*[\s\S]{0,500}?\*\//, token: 'comment' },
     { re: /"(?:[^"\\\n]|\\.){0,500}"/, token: 'string' },
     { re: /'(?:[^'\\\n]|\\.){0,500}'/, token: 'string' },
-    // Selectors with `.foo`, `#bar`, `:hover` — yellow.
+    // 带 `.foo`、`#bar`、`:hover` 这类 selector - 黄色。
     { re: /[#.][a-zA-Z_-][\w-]*/, token: 'type' },
     { re: /:[a-zA-Z-]+(?:\([^)]*\))?/, token: 'function' },
-    // Property names (identifier directly followed by `:`).
+    // 属性名（标识符后面紧跟 `:`）。
     { re: /\b[a-zA-Z-]+(?=\s*:)/, token: 'function' },
-    // #hex colors and numeric values (with optional unit).
+    // #hex 颜色和数值（可带单位）。
     { re: /#[0-9a-fA-F]{3,8}\b/, token: 'number' },
     { re: /-?\b\d+(?:\.\d+)?(?:px|em|rem|%|vh|vw|deg|s|ms|fr)?\b/, token: 'number' },
   ])
@@ -724,7 +717,8 @@ function yamlRules(): Rule[] {
     { re: /#[^\n]*/, token: 'comment' },
     { re: /"(?:[^"\\\n]|\\.){0,500}"/, token: 'string' },
     { re: /'(?:[^'\\\n]|\\.){0,500}'/, token: 'string' },
-    // Key followed by `:` (at start-ish of line; we don't track position so this is approximate).
+    // 后面跟着 `:` 的 key（大概在行首附近；我们不追踪精确位置，所以
+    // 这里是近似匹配）。
     { re: /\b[a-zA-Z_][\w-]*(?=\s*:)/, token: 'function' },
     { re: /\b(?:true|false|null|yes|no|on|off)\b/i, token: 'literal' },
     { re: /-?\b\d+(?:\.\d+)?\b/, token: 'number' },
@@ -736,7 +730,7 @@ function shellRules(): Rule[] {
     { re: /#[^\n]*/, token: 'comment' },
     { re: /"(?:[^"\\\n]|\\.){0,500}"/, token: 'string' },
     { re: /'[^'\n]{0,500}'/, token: 'string' },
-    // Variables: $VAR or ${VAR}.
+    // 变量：$VAR 或 ${VAR}。
     { re: /\$\{[^}\n]{1,200}\}|\$[A-Za-z_]\w*/, token: 'literal' },
     { re: /-?\b\d+\b/, token: 'number' },
     { re: /[A-Za-z_][\w-]*/, token: 'keyword' },
@@ -746,7 +740,7 @@ function shellRules(): Rule[] {
 function pythonRules(): Rule[] {
   return makeRules([
     { re: /#[^\n]*/, token: 'comment' },
-    // Triple strings (single line — multi-line wouldn't survive per-line tokenization anyway).
+    // 三引号字符串（这里只处理单行 - 多行本来也活不过按行 token 化）。
     { re: /"""(?:[^"\\]|\\.){0,500}"""/, token: 'string' },
     { re: /'''(?:[^'\\]|\\.){0,500}'''/, token: 'string' },
     { re: /"(?:[^"\\\n]|\\.){0,500}"/, token: 'string' },
@@ -775,9 +769,9 @@ function rustRules(): Rule[] {
     { re: /\/\/[^\n]*/, token: 'comment' },
     { re: /\/\*[\s\S]{0,500}?\*\//, token: 'comment' },
     { re: /"(?:[^"\\\n]|\\.){0,500}"/, token: 'string' },
-    { re: /'(?:[^'\\\n]|\\.){0,5}'/, token: 'string' }, // char literal
+    { re: /'(?:[^'\\\n]|\\.){0,5}'/, token: 'string' }, // 字符字面量
     { re: /\b\d+(?:_\d+)*(?:\.\d+(?:_\d+)*)?(?:[eE][+-]?\d+)?(?:[uif]\d+|usize|isize)?\b/, token: 'number' },
-    { re: /[A-Za-z_][\w]*!/, token: 'function' }, // macros
+    { re: /[A-Za-z_][\w]*!/, token: 'function' }, // 宏
     { re: /[A-Za-z_][\w]*(?=\s*\()/, token: 'function' },
     { re: /[A-Za-z_][\w]*/, token: 'keyword' },
   ])
@@ -785,7 +779,7 @@ function rustRules(): Rule[] {
 
 function mdRules(): Rule[] {
   return makeRules([
-    { re: /^#{1,6}\s.*/, token: 'type' }, // heading
+    { re: /^#{1,6}\s.*/, token: 'type' }, // 标题
     { re: /\*\*[^*\n]{1,200}\*\*/, token: 'keyword' },
     { re: /`[^`\n]{1,200}`/, token: 'string' },
     { re: /\[[^\]\n]{1,200}\]\([^)\n]{1,200}\)/, token: 'function' },
@@ -805,57 +799,55 @@ const RULES_BY_LANG: Record<Lang, () => Rule[]> = {
   md: mdRules,
 }
 
-// ─── Token coloring ───
+// ─── Token 着色 ───
 
-/** Apply a color spec from the active palette. Hex strings go through
- *  `chalk.hex`; named ANSI colors go through chalk's named accessor; a
- *  null spec returns the text unchanged (used by `'off'` and by the
- *  identifier-classification fallthrough when a word doesn't match
- *  any known keyword/type pattern). */
+/** 把当前调色板里的颜色规范应用到文本上。
+ *  hex 字符串走 `chalk.hex`；命名 ANSI 颜色走 chalk 的命名访问器；
+ *  `null` 则保持文本不变（`'off'` 会用到它，另外当单词没有匹配到
+ *  任何已知 keyword/type 模式时，identifier 分类的回退也会用到它）。 */
 export function applyColor(text: string, spec: ColorSpec): string {
   if (spec === null) return text
   if (spec.startsWith('#')) return c.hex(spec)(text)
-  // Named ANSI color — a small accessor lookup. Chalk types this as a
-  // chainable getter, but we only need the common 8/16 colors.
+  // 命名 ANSI 颜色 - 这里只做一个很小的访问器查找。
+  // Chalk 把它类型化成可链式 getter，但我们只需要常见的 8 / 16 色。
   const named = (c as unknown as Record<string, (s: string) => string>)[spec]
   if (typeof named === 'function') return named(text)
   return text
 }
 
-/** Default-fg fallback. Used by paint() and the unmatched-character
- *  loop in highlightLine to give plain text inside diff rows the same
- *  bright cream/dark-gray that CC's `Theme.foreground` produces.
- *  When `defaultFg` is null/undefined, falls through unchanged. */
+/** 默认前景色回退。供 paint() 和 highlightLine 里的“未匹配字符”循环使用，
+ *  让 diff 行里的纯文本也能得到和 CC 的 `Theme.foreground` 一样的
+ *  亮奶白 / 深灰效果。
+ *  当 `defaultFg` 是 null / undefined 时，就保持不变。 */
 function paintDefault(text: string, defaultFg: ColorSpec | undefined): string {
   if (!defaultFg) return text
   return applyColor(text, defaultFg)
 }
 
 function paint(text: string, token: Token, lang: Lang, palette: Palette, defaultFg?: ColorSpec): string {
-  // Identifier post-classification: for languages where the same regex
-  // matches keywords / literals / generic identifiers, we re-bucket
-  // based on the source word. This keeps the rule tables flat.
+  // 标识符的二次分类：对于那些同一个正则会匹配 keyword / literal /
+  // 普通 identifier 的语言，我们会根据原始单词重新分桶。
+  // 这样 rule table 就能保持扁平，不需要写很多嵌套规则。
   if (token === 'keyword') {
     const word = text
-    // Storage keywords route to the `storage` palette slot for ALL
-    // languages — `function`/`const`/`class`/`def`/`fn`/`struct` etc.
-    // come out cyan (Monokai) / magenta (GitHub) instead of the same
-    // hot-pink as control-flow keywords. Mirrors CC scopeColor's
-    // STORAGE_KEYWORDS check (color-diff/index.ts:459-461).
+    // storage 关键字会在所有语言里都路由到 `storage` 调色板槽位 -
+    // `function` / `const` / `class` / `def` / `fn` / `struct` 等都会
+    // 变成青色（Monokai）/ 洋红（GitHub），而不是和控制流关键字一样
+    // 变成热粉。这里对齐的是 CC scopeColor 里的 STORAGE_KEYWORDS 检查
+    // （color-diff/index.ts:459-461）。
     if (STORAGE_KEYWORDS.has(word)) return applyColor(text, palette.storage)
     if (lang === 'js') {
       if (KEYWORDS_JS.has(word)) return applyColor(text, palette.keyword)
       if (LITERALS_JS.has(word)) return applyColor(text, palette.literal)
-      // Known JS globals (`console`, `Math`, `JSON`, ...) → palette.type.
-      // Reasoning: hljs scopes them as `built_in`, and across CC's three
-      // syntax themes `built_in` and `type` always share a color
-      // (monokai chartreuse / github-light teal / ansi bright cyan).
-      // The `function` slot is reserved for `title.function` (declaration
-      // names like `greet`) which differs in github-light (purple) and
-      // ANSI (bright yellow).
+      // 已知 JS 全局对象（`console`、`Math`、`JSON` 等）→ palette.type。
+      // 原因是 hljs 会把它们标成 `built_in`，而在 CC 的三套语法主题里，
+      // `built_in` 和 `type` 始终同色（monokai 黄绿色 / github-light 青绿 /
+      // ansi 亮青）。`function` 槽位保留给 `title.function`
+      //（像 `greet` 这样的声明名），因为它在 github-light 里是紫色、
+      // 在 ANSI 里是亮黄。
       if (JS_GLOBALS.has(word)) return applyColor(text, palette.type)
-      // Heuristic: PascalCase identifiers are most likely type / class
-      // names. Cheap, no false-negative on common idiomatic code.
+      // 启发式：PascalCase 标识符大概率是类型 / 类名。
+      // 这个判断很便宜，而且对常见惯用代码几乎没有漏判。
       if (/^[A-Z][a-zA-Z0-9_]*$/.test(word)) return applyColor(text, palette.type)
       return paintDefault(text, defaultFg)
     }
@@ -877,18 +869,16 @@ function paint(text: string, token: Token, lang: Lang, palette: Palette, default
   return paintDefault(text, defaultFg)
 }
 
-// ─── Main entry ───
+// ─── 主入口 ───
 
-/** Highlight a single line of code using the named theme (or the active
- *  module-level theme when omitted). Returns ANSI-colored text whose
- *  visible width is identical to the input — only escape codes added,
- *  no character substitution.
+/** 用指定主题（如果没传，就用当前模块级主题）高亮单行代码。
+ *  返回的是 ANSI 彩色文本，但可见宽度和输入完全一致 - 只增加 escape
+ *  code，不替换字符本身。
  *
- *  When `lang` is null (file extension we don't recognize) or the active
- *  theme is `'off'`, the output (with no `defaultFg`) is identical to
- *  the input. With `defaultFg`, ALL chars get a fg color so unhighlighted
- *  text on the diff bg matches CC's brighter cream/dark-gray instead of
- *  the terminal default white. */
+ *  当 `lang` 为 null（文件扩展名不认识）或者当前主题是 `'off'` 时，
+ *  如果没有 `defaultFg`，输出会和输入完全一致。若有 `defaultFg`，
+ *  那么所有字符都会带前景色，这样 diff 背景上的未高亮文本就能像 CC
+ *  一样显示成更亮的奶白 / 深灰，而不是终端默认白色。 */
 export function highlightLine(
   line: string,
   lang: Lang | null,
@@ -897,18 +887,18 @@ export function highlightLine(
 ): string {
   if (line.length === 0) return line
 
-  // Unrecognized language: just paint the whole line in defaultFg if
-  // provided (so a Python diff with no Python rules still gets the
-  // bright cream fg on bg), else identity.
+  // 语言不认识时：如果提供了 defaultFg，就把整行都涂成它
+  //（这样一个没有 Python 规则的 Python diff 也能在背景上显示成
+  // 亮奶白前景）；否则就原样返回。
   if (lang === null) {
     return defaultFg ? applyColor(line, defaultFg) : line
   }
 
   const palette = THEMES[theme ?? currentTheme]
-  // For `'off'` (all-null palette), there are no token colors to apply.
-  // But we still want defaultFg so unhighlighted text on diff bg has
-  // the right brightness. Skip the regex work — paint the whole line
-  // in defaultFg (or identity if no defaultFg).
+  // 对 `'off'`（全 null 调色板）来说，没有任何 token 颜色可用。
+  // 但我们仍然希望 defaultFg 生效，这样 diff 背景上的未高亮文本
+  // 亮度才对。这里直接跳过正则工作 - 整行都用 defaultFg 着色
+  //（如果没有 defaultFg，就直接原样返回）。
   if (palette === THEMES.off) {
     return defaultFg ? applyColor(line, defaultFg) : line
   }
@@ -931,10 +921,11 @@ export function highlightLine(
       }
     }
     if (!matched) {
-      // No rule matched — paint one char in defaultFg (or pass through).
-      // This catches punctuation `(`, `)`, `;`, `{`, `}`, etc. — CC's
-      // hljs scopes them as `punctuation` (= theme.foreground). Single-
-      // char advancement keeps the loop bounded.
+      // 没有任何规则匹配到 - 就把当前字符按 defaultFg 着色（或者
+      // 原样透传）。
+      // 这会覆盖 `(`、`)`、`;`、`{`、`}` 这些标点 - CC 的 hljs 会
+      // 把它们标成 `punctuation`（也就是 theme.foreground）。
+      // 每次只前进一个字符，可以保证循环是有界的。
       out += defaultFg ? applyColor(line[pos]!, defaultFg) : line[pos]!
       pos++
     }

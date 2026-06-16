@@ -1,9 +1,9 @@
-// @x-code-cli/cli — Paste-reference helpers.
+// @x-code-cli/cli — 粘贴引用辅助工具。
 //
-// Large pastes aren't displayed inline in the input box. Instead we store the
-// full content in a map and show a placeholder like `[Pasted text #2 +217 lines]`
-// in its place. On Enter, the placeholder is expanded back to the full content
-// before being handed to the agent. Modeled on Claude Code's PromptInput.
+// 大段粘贴内容不会直接展开显示在输入框里。我们会把完整文本存进
+// 一个映射表里，只在输入框中保留类似 `[Pasted text #2 +217 lines]`
+// 的占位符。用户按 Enter 提交时，再把占位符还原成原始内容后交给
+// agent。这个交互方式参考了 Claude Code 的 PromptInput。
 
 export interface PastedEntry {
   id: number
@@ -13,10 +13,10 @@ export interface PastedEntry {
 
 export type PastedContents = Record<number, PastedEntry>
 
-/** Regex for finding paste refs anywhere in a string (used on submit). */
+/** 用于在字符串任意位置查找粘贴引用的正则表达式。提交时会用到。 */
 const REF_ANY_RE = /\[Pasted text #(\d+)(?: \+\d+ lines)?\]/g
 
-/** Regex for checking whether a string ends with a paste ref (used on backspace). */
+/** 用于判断字符串末尾是否是粘贴引用。退格删除时会用到。 */
 const REF_TAIL_RE = /\[Pasted text #(\d+)(?: \+\d+ lines)?\]$/
 
 export function formatPasteRef(id: number, lineCount: number): string {
@@ -25,8 +25,8 @@ export function formatPasteRef(id: number, lineCount: number): string {
 }
 
 /**
- * Replace every `[Pasted text #N …]` reference in `text` with the real
- * content stored in `contents`. Refs whose id is missing are left as-is.
+ * 把 `text` 里的每个 `[Pasted text #N …]` 引用替换成 `contents` 中
+ * 保存的真实内容。若某个 id 找不到，就保留原样，避免误删用户输入。
  */
 export function expandPasteRefs(text: string, contents: PastedContents): string {
   return text.replace(REF_ANY_RE, (match, idStr: string) => {
@@ -37,10 +37,12 @@ export function expandPasteRefs(text: string, contents: PastedContents): string 
 }
 
 /**
- * If `text` ends with a paste-ref placeholder, return the text with the ref
- * removed plus the id of the removed entry (so the caller can drop it from
- * the pasted-contents map). Otherwise return null — the caller should fall
- * back to removing a single character.
+ * 如果 `text` 以粘贴引用占位符结尾，就返回：
+ * 1. 去掉该引用后的文本
+ * 2. 被删掉的引用 id
+ *
+ * 这样调用方就能顺手把对应的内容从粘贴映射里移除。否则返回 null，
+ * 调用方再退回到“删除一个字符”的普通退格逻辑。
  */
 export function stripTrailingRef(text: string): { without: string; id: number } | null {
   const m = text.match(REF_TAIL_RE)

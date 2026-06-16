@@ -197,10 +197,9 @@ export function ChatInput({
 }: ChatInputProps) {
   const [{ text, cursor }, dispatch] = useReducer(inputReducer, { text: '', cursor: 0 })
   const cursorRef = useRef(0)
-  // Double-tap Esc to clear the input (idle mode only; loading mode uses
-  // single Esc to cancel the in-flight turn). Timestamp of the last Esc
-  // that didn't already clear; second press within DOUBLE_ESC_WINDOW_MS
-  // triggers RESET.
+  // 双击 Esc 可以清空输入（只在 idle 模式生效；loading 模式会用单次 Esc 取消当前回合）。
+  // 这里记录的是“上一次没有触发清空的 Esc”的时间戳；
+  // 如果在 DOUBLE_ESC_WINDOW_MS 之内又按了一次，就会触发 RESET。
   const lastEscapeAtRef = useRef(0)
   useLayoutEffect(() => {
     cursorRef.current = cursor
@@ -208,62 +207,58 @@ export function ChatInput({
   const [pastedContents, setPastedContents] = useState<PastedContents>({})
   const [completionIndex, setCompletionIndex] = useState(0)
   const [atCompletionIndex, setAtCompletionIndex] = useState(0)
-  // Tracks the trigger-key (atIdx + query) the user dismissed via Esc.
-  // The menu hides while atTrigger.atIdx + query equals this; once the
-  // user types or backspaces the trigger naturally changes and the
-  // menu reopens — no need for an explicit "clear" path.
+  // 记录用户通过 Esc 关闭掉的 trigger-key（atIdx + query）。
+  // 当 atTrigger.atIdx + query 和这里相等时，菜单会隐藏；
+  // 用户一旦继续输入或 backspace，trigger 自然就变了，菜单也会重新打开，
+  // 不需要额外的“清空”路径。
   const [atDismissed, setAtDismissed] = useState<string | null>(null)
   const { entries: fileEntries } = useFileCompletion()
   const nextPasteIdRef = useRef(1)
   const activeRef = useRef(false)
   const prevFrameRef = useRef<Cell[][]>([])
-  /** Timestamp (ms) of the last stdout.write that actually hit the
-   *  terminal. Used to coalesce spinner-tick writes that would fire
-   *  immediately after a scrollback-commit write — see flush section. */
+  /** 最近一次真正写到终端上的 stdout.write 的时间戳（毫秒）。
+   *  用来合并 spinner tick 的写入：它们常常会紧跟在 scrollback commit 之后触发，
+   *  具体逻辑见 flush 部分。 */
   const lastFlushTimeRef = useRef(0)
-  /** Pending deferred (non-commit) write that can be superseded by a commit. */
+  /** 待处理的 deferred（非 commit）写入，后续可能会被 commit 覆盖。 */
   const deferredFlushRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  /** Pending throttled commit. Set when a commit fires within MIN_COMMIT_GAP_MS
-   *  of the previous write — the commit's payload waits just long enough that
-   *  it lands in a fresh terminal paint cycle instead of inside the same vsync
-   *  as the previous write. Distinct from `deferredFlushRef` because the
-   *  defer path must NOT cancel a throttled commit (cancelling would lose
-   *  the new scrollback content the commit's preBuf carries). */
+  /** 待执行的 throttled commit。
+   *  当 commit 距离上一次写入小于 MIN_COMMIT_GAP_MS 时会进入这里 -
+   *  它会再等一小会儿，确保落到一个新的 terminal paint cycle，
+   *  而不是和上一写入挤进同一个 vsync。
+   *  这和 `deferredFlushRef` 不一样，因为 defer 路径不能取消 throttled commit；
+   *  一旦取消，就会丢掉 commit 的 preBuf 里承载的新 scrollback 内容。 */
   const commitThrottleRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  /** Monotonic counter incremented by every successful `doFlush`. The
-   *  deferred-write path captures this at SCHEDULE time and re-checks
-   *  at FIRE time: if the value has changed, a commit-path flush ran
-   *  in the interim and our spinner-only frame is stale (the commit
-   *  already repainted the cell). Closes the race the bare
-   *  `clearTimeout` cancellation can't catch — when the macrotask
-   *  for the deferred timer is already queued AND a commit's useEffect
-   *  also queues a flush in the same tick, both writes hit stdout
-   *  1-2ms apart and the user sees a visible flicker. */
+  /** 每次成功 `doFlush` 时单调递增的计数器。
+   *  deferred-write 路径会在 SCHEDULE 时记录它，并在 FIRE 时再检查一次：
+   *  如果值变了，就说明中途已经有 commit-path flush 跑过了，
+   *  我们这次的 spinner-only frame 已经过时（commit 已经把 cell 重绘过了）。
+   *  这能补上单纯 `clearTimeout` 取消抓不到的竞态 -
+   *  当 deferred timer 的 macrotask 已经排队，同时 commit 的 useEffect 也在同一个 tick
+   *  里排了 flush，两个写入会相隔 1-2ms 打到 stdout，用户就会看到明显闪一下。 */
   const flushGenRef = useRef(0)
-  /** Last `spinnerFrame` value seen by the flush effect. We compare against
-   *  the current frame to distinguish "this render was triggered by a
-   *  spinner tick" (spinner glyph cycled) from "this render was triggered
-   *  by typing / content change" (spinner unchanged). The two cases want
-   *  different deferred-flush windows: spinner ticks should defer longer
-   *  (~24ms) so the next text-stream commit can absorb them, but typing
-   *  must defer briefly (~8ms) or it visibly stutters under a held key. */
+  /** flush effect 上一次看到的 `spinnerFrame` 值。
+   *  我们会拿它和当前 frame 对比，区分“这次 render 是被 spinner tick 触发的”
+   *  （spinner glyph 轮了一格）和“这次 render 是被打字 / 内容变化触发的”
+   *  （spinner 没变）。
+   *  这两种情况需要不同的 deferred-flush 窗口：
+   *  spinner tick 应该稍微多延后一点（约 24ms），让下一次文本流 commit 能吸收它；
+   *  打字则只能很短地延后（约 8ms），不然长按键时会明显卡顿。 */
   const lastFlushedSpinnerFrameRef = useRef<number | null>(null)
-  /** Height of the frame currently sitting at the bottom of the terminal
-   *  (the value that prevFrameRef was last set to). Tracked separately
-   *  because prevFrameRef gets reset to [] on transitions (post-hidden,
-   *  frame-height change) while we still need to know where the PHYSICAL
-   *  frame on screen begins so the next DECSTBM scroll region doesn't
-   *  overlap it. */
+  /** 当前位于终端底部的 frame 高度（也就是 prevFrameRef 上一次被设置时的值）。
+   *  这里单独保存，是因为 prevFrameRef 在一些状态切换
+   *  （hidden 之后、frame 高度变化）时会被重置成 []；
+   *  但我们仍然需要知道屏幕上物理 frame 是从哪里开始的，
+   *  这样下一个 DECSTBM scroll region 才不会和它重叠。 */
   const lastFrameHRef = useRef(0)
-  /** Last known terminal dimensions. Compared against current values in
-   *  the render effect to detect resize and compute where the OLD frame
-   *  was positioned so it can be erased before painting at the new spot. */
+  /** 最近一次已知的终端尺寸。
+   *  会在 render effect 里和当前值比较，用来检测 resize，
+   *  并算出旧 frame 当时放在哪，这样就能在新位置绘制前先把旧位置擦掉。 */
   const lastTermRowsRef = useRef(0)
   const lastTermWidthRef = useRef(0)
-  /** Rows of blank space between the last on-screen content row and the
-   *  TERMINAL BOTTOM. Conceptually the same value as the original "blanks
-   *  above frame" — what changed is where we choose to draw the frame
-   *  inside that empty zone:
+  /** 最后一行可见内容和终端底部之间的空白行数。
+   *  概念上和最初的“frame 上方空白行”是同一个值，
+   *  只是这里改成在这块空白区内部决定 frame 画在哪里：
    *
    *    - When this is 0 the frame sits at the bottom of the terminal
    *      (the original always-anchored-at-bottom behavior).
@@ -275,82 +270,78 @@ export function ChatInput({
    *      anchored at bottom of empty terminal" gap users see when
    *      starting a fresh conversation.
    *
-   *  Across the rest of the render code this still tracks "free row
-   *  budget that the next commit can write into without scrolling real
-   *  history" — that arithmetic is identical regardless of where the
-   *  frame is parked inside the empty zone. */
+   *  在后续所有 render 代码里，它仍然表示“下一次 commit 可以写入、
+   *  但不用真的滚动历史记录的空白行预算”——不管 frame 停在空白区的哪个位置，
+   *  这套算术关系都不变。 */
   const freeBlanksAboveFrameRef = useRef(0)
-  /** Number of blank rows currently sitting DIRECTLY ABOVE the frame, left
-   *  there by a large-shrink (deltaH > 3) that snapped the frame to the
-   *  bottom and erased the old frame area without committing it to
-   *  scrollback. Without this counter, a subsequent grow would emit LFs
-   *  at termRows to "make room" — pushing those blank rows into terminal
-   *  scrollback as permanent empty lines (visible as the big blank gap
-   *  under a Task() result when sub-agents open multiple permission
-   *  dialogs in a row).
+  /** 当前直接位于 frame 上方的空白行数。
+   *  这些空白来自一次大幅 shrink（deltaH > 3）：frame 被压到底部，
+   *  旧 frame 区域被擦掉，但没有把这些空白写进 scrollback。
+   *  如果没有这个计数器，后续 grow 时就只能在 termRows 处发 LF 来“腾位置”，
+   *  结果会把这些空白行推进终端历史，变成永久的空行
+   *  （比如 sub-agent 连续打开多个 permission 对话框时，
+   *  Task() 结果下面会出现一大块空白缝）。
    *
-   *  Consumed by the grow path before deciding how many LFs to emit:
-   *  the frame extends UP into these blanks via cell-grid repositioning
-   *  (no scroll), so only the rows BEYOND the blank zone need to be
-   *  scrolled into history. Reset on commit (committed scrollback now
-   *  occupies the rows directly above the frame), resize, and /clear. */
+   *  grow 路径会先消耗这部分空白，再决定还要发多少 LF：
+   *  frame 会通过 cell-grid 重定位向上延展进这些空白区（不触发滚动），
+   *  所以只有超出空白区之外的行才需要真正滚进历史。
+   *  commit、resize 和 `/clear` 时都会重置。 */
   const blankRowsAboveFrameRef = useRef(0)
-  /** Last actual frameTop row written to the terminal. Stored separately
-   *  because frameTop is no longer derivable from (termRows, frameH)
-   *  alone — it now also depends on freeBlanksAboveFrameRef. Read by
-   *  unmount cleanup (buildEraseRegion) and the resize handler so they
-   *  can erase the OLD on-screen frame at its actual position rather
-   *  than guessing it from termRows. */
+  /** 上一次真正写到终端上的 frameTop 行号。
+   *  这里单独保存，是因为 frameTop 已经不能只靠 (termRows, frameH)
+   *  推出来了 —— 它现在还取决于 freeBlanksAboveFrameRef。
+   *  这个值会被 unmount 清理逻辑（buildEraseRegion）和 resize 处理器读取，
+   *  这样它们就能按旧 frame 的真实位置去擦，而不是只按 termRows 猜。 */
   const lastFrameTopRef = useRef(0)
-  /** Reserves vertical space inside the tool-running frame when a permission
-   *  dialog just closed but its approved tool hasn't committed a result yet.
-   *  Without the reservation the frame snaps 7→5 rows (permission was 4 rows,
-   *  tool rows are 2) and the now-empty top 2 rows of the old permission
-   *  region flash as blank lines between the last committed scrollback entry
-   *  and the running tool — for a beat the user sees "Running..." pinned to
-   *  the bottom with a gap above, until the tool finishes and its commit
-   *  backfills those rows. The reservation holds the frame at the old size
-   *  so the in-progress tool row stays painted WHERE the permission title
-   *  used to be; the blank rows move below the tool (between tool and
-   *  input), which the next commit / grow consumes cleanly. Cleared on any
-   *  commit (the tool result lands in the reserved slot) or when a new
-   *  permission arrives (that permission re-fills the slot itself). */
+  /** 当 permission 对话框刚关闭，但它批准的工具还没提交结果时，
+   *  用来在 tool-running frame 内预留的垂直空间。
+   *  没有这层预留的话，frame 会从 7 行直接缩到 5 行
+   *  （permission 占 4 行，tool 只占 2 行），
+   *  旧 permission 区域顶部那 2 行就会在“最后一次已提交的 scrollback”和
+   *  正在运行的工具之间闪成空白。
+   *  于是用户会短暂看到“Running...” 贴在底部、上面却有一条缝，
+   *  直到工具结束并由 commit 把这些行回填。
+   *  这个预留会把 frame 保持在旧尺寸，让进行中的 tool 行继续画在
+   *  permission title 原来所在的位置；空白行则被挪到 tool 下方
+   *  （也就是 tool 和 input 之间），下一次 commit / grow 就能干净地吃掉它们。
+   *  任意 commit（tool 结果落入预留槽）或者新的 permission 到来（新的 permission
+   *  自己填满这个槽）时都会清掉。 */
   const permissionSlotReserveRef = useRef(0)
   const prevHadPermissionRef = useRef(false)
-  /** True while a Permission/SelectOptions dialog was showing on the
-   *  previous render. When it disappears we need to erase the old frame
-   *  before redrawing — Ink's log.clear returns the cursor to the row
-   *  where the dialog started, which is exactly our frame's bottom row,
-   *  so a normal eraseRegion-by-prevFrame works cleanly. */
+  /** 上一帧是否正在显示 Permission / SelectOptions 对话框。
+   *  当它消失时，我们需要先擦掉旧 frame 再重画。
+   *  Ink 的 log.clear 会把光标带回对话框开始时所在的那一行，
+   *  恰好就是我们 frame 的底行，所以直接按 prevFrame 做一次正常的
+   *  eraseRegion 就能干净处理。 */
   const wasHiddenRef = useRef(false)
-  /** Set by the shrink-detection path (a /clear emptied messages) so the
-   *  next first-paint seeds freeBlanks for an empty viewport instead of
-   *  reserving banner-sized space at the top — there is no banner left
-   *  on screen after the clear-screen ANSI write. Cleared once consumed. */
+  /** 由 shrink 检测路径设置（例如 `/clear` 把 messages 清空）。
+   *  这样下一次 first-paint 就会按空视口去初始化 freeBlanks，
+   *  而不是在顶部继续预留一块横幅大小的空间——清屏 ANSI 写完之后，
+   *  屏幕上已经没有横幅了。消耗一次后就清掉。 */
   const justClearedRef = useRef(false)
-  /** How many messages we've already committed to scrollback. */
+  /** 已经提交到 scrollback 的消息数量。 */
   const writtenMessageCountRef = useRef(0)
-  /** Scrollback bytes collected this render that haven't reached stdout yet.
-   *  Survives across renders so a cancelled commit-throttle doesn't drop
-   *  message bytes — `writtenMessageCountRef` is bumped synchronously when
-   *  we walk new messages, so a follow-up render won't re-collect them via
-   *  `writeMessageToStdout`. Without this ref, the only path that carried
-   *  the bytes was the local `scrollbackContent` of the render that
-   *  scheduled the throttle; if that throttle got superseded by a height
-   *  change 1ms later (`commit-throttle-superseded-by-height`), the bytes
-   *  vanished. Cleared inside `doFlush` once the write actually lands.
-   *  Symptom this cures: streamed multi-line replies whose final commit
-   *  shrinks the frame (end-of-turn spinner removal) silently lose the
-   *  last message — visible as a reply that stops mid-paragraph in the
-   *  scrollback even though the full text is in `state.messages`. */
+  /** 本次 render 收集到、但还没写到 stdout 的 scrollback 字节。
+   *  它会跨 render 保留下来，这样被取消的 commit-throttle 就不会把消息字节丢掉。
+   *  我们在遍历新消息时会同步推进 `writtenMessageCountRef`，
+   *  所以后续 render 不会再通过 `writeMessageToStdout` 重复收集这些内容。
+   *  如果没有这个 ref，承载字节的唯一地方就只有触发 throttle 的那次 render
+   *  里的局部 `scrollbackContent`；一旦它后来被 1ms 后的高度变化覆盖
+   *  （`commit-throttle-superseded-by-height`），字节就会直接消失。
+   *  真正写出后会在 `doFlush` 里清空。
+   *  这个修复的症状是：流式多行回复在最后一次 commit 收缩 frame
+   *  （比如回合结束时 spinner 消失）后，会静默丢掉最后一条消息，
+   *  scrollback 里看起来像是回复写到一半就断了，虽然 `state.messages`
+   *  里明明有完整文本。 */
   const pendingScrollbackRef = useRef('')
-  // Permission dialog: selection index (0 = Yes, 1 = No). Rendered inside
-  // our cell buffer — not via Ink — so the dialog never fights our
-  // cursor management. Reset to 0 whenever the prompt changes (new tool
-  // call) using React's "adjust state during render" pattern — React
-  // throws away the first render and immediately re-renders, which is
-  // cheaper than a cascading setState-inside-effect and doesn't trip the
-  // react-hooks/set-state-in-effect lint.
+  // Permission 对话框的选中索引（0 = Yes，1 = No）。
+  // 它画在我们自己的 cell buffer 里，而不是交给 Ink，
+  // 这样对话框就不会和我们的光标管理打架。
+  // 每次 prompt 变化（新的 tool call）时都会重置为 0，
+  // 这里使用 React 的“在 render 期间调整 state”模式：
+  // React 会丢掉第一次 render 并立即重渲染，
+  // 这比在 effect 里串联 setState 更便宜，也不会踩到
+  // react-hooks/set-state-in-effect lint。
   // https://react.dev/reference/react/useState#storing-information-from-previous-renders
   const [permissionSelected, setPermissionSelected] = useState(0)
   const [lastPermissionKey, setLastPermissionKey] = useState<string | null>(null)
@@ -360,15 +351,15 @@ export function ChatInput({
     setPermissionSelected(0)
   }
 
-  // Selected index for the in-frame select-options dialog. Reset whenever a
-  // new dialog opens (keyed on the question string since that's what changes).
+  // frame 内 select-options 对话框的选中项。
+  // 每次新对话框打开时都会重置（以 question 字符串为 key，
+  // 因为变化的就是它）。
   const [selectIndex, setSelectIndex] = useState(0)
   const [lastSelectKey, setLastSelectKey] = useState<string | null>(null)
-  // Inline text buffer for the "Other" freeform option. Captured as
-  // {text, cursor} so the inverse-video cursor renders the same way as
-  // the main input. Preserved while navigating between options in the
-  // same dialog (so the user can re-enter "Other" without losing what
-  // they typed) but cleared when a new dialog opens.
+  // “Other” 自由输入项的内联文本缓冲。
+  // 以 {text, cursor} 形式保存，这样反显光标的渲染方式会和主输入框一致。
+  // 在同一个对话框内切换选项时会保留，方便用户回到 “Other” 继续编辑；
+  // 新对话框打开时则清空，避免把旧输入带过去。
   const [freeform, setFreeform] = useState<{ text: string; cursor: number }>({ text: '', cursor: 0 })
   const selectKey = selectRequest ? selectRequest.question : null
   if (selectKey !== lastSelectKey) {
@@ -377,14 +368,14 @@ export function ChatInput({
     setFreeform({ text: '', cursor: 0 })
   }
 
-  // Spinner animation — self-contained so the parent doesn't have to
-  // re-render 12× per second. Only runs while `spinner` is truthy.
+  // Spinner 动画独立封装，这样父组件就不用每秒重渲染 12 次。
+  // 只在 `spinner` 有值时运行。
   //
-  // We only keep ONE piece of React state (`spinnerFrame`) because its
-  // change is what triggers the re-render that redraws the cell frame.
-  // `elapsedMs` is derived at render time from `loadingStartRef` so we
-  // never do a synchronous setState inside the effect (would trigger
-  // cascading renders / the react-hooks/set-state-in-effect lint).
+  // 这里只保留一个 React state（`spinnerFrame`），因为它的变化
+  // 就足以触发一次重渲染并刷新 cell frame。
+  // `elapsedMs` 则在 render 时从 `loadingStartRef` 推导，
+  // 这样就不会在 effect 里同步 setState（否则会触发连锁重渲染，
+  // 也会踩到 react-hooks/set-state-in-effect lint）。
   const [spinnerFrame, setSpinnerFrame] = useState(0)
   const loadingStartRef = useRef<number>(0)
 
@@ -454,20 +445,20 @@ export function ChatInput({
     }
   }, [])
 
-  // ── Fuzzy matching ──
+  // ── 模糊匹配 ──
   //
-  // Two-stage menu: stage 1 completes the slash command name itself
-  // (`/mc` → `/mcp`); stage 2 fires after the user types a space and
-  // completes a subcommand for commands that declare one (`/mcp ` →
-  // `list / tools / auth / ...`). A third stage (server names, model
-  // ids) would need an async per-command `complete()` callback —
-  // intentionally not implemented; the second stage handles 80% of the
-  // pain (the 8-subcommand `/mcp` block) at a tenth the code.
+  // 两阶段菜单：第一阶段补全 slash 命令名本身
+  //（`/mc` → `/mcp`）；第二阶段在用户输入空格后触发，
+  // 为声明了子命令的命令补全子命令（`/mcp ` →
+  // `list / tools / auth / ...`）。第三阶段（server name、model
+  // id）则需要每个命令各自提供异步 `complete()` 回调——这里故意没做；
+  // 第二阶段已经能解决 80% 的痛点（8 个子命令的 `/mcp` 区块），
+  // 代码量却只有十分之一。
   //
-  // Items carry `applyText` so the accept paths (Tab / Enter) can set
-  // the input to the full path (`/mcp auth`) regardless of which stage
-  // the user picked from. Display columns still use the bare `name`
-  // (stage 2 shows `auth`, not `/mcp auth`) so the menu stays scannable.
+  // 条目会带 `applyText`，这样接受路径（Tab / Enter）就能把输入设置成完整路径
+  //（`/mcp auth`），不管用户是在哪一阶段选中的。
+  // 显示列仍然只用裸 `name`（第二阶段显示 `auth`，而不是 `/mcp auth`），
+  // 这样菜单更容易快速扫读。
   const matches = useMemo<MenuItem[]>(() => {
     if (!text.startsWith('/')) return []
 
@@ -481,7 +472,7 @@ export function ChatInput({
 
     const firstSpace = text.indexOf(' ')
     if (firstSpace === -1) {
-      // Stage 1: typing the command name. Match against /-stripped names.
+      // 第一阶段：正在输入命令名。匹配去掉 / 之后的名称。
       const query = text.slice(1).toLowerCase()
       const filtered = !query ? commands : commands.filter((c) => fuzzyMatches(c.name.slice(1).toLowerCase(), query))
       return filtered.map<MenuItem>((c) => ({
@@ -492,10 +483,9 @@ export function ChatInput({
       }))
     }
 
-    // Stage 2: typing the subcommand. `head` is the command (e.g. "/mcp"),
-    // `tail` is whatever follows the first space. A second space means the
-    // user has moved past the subcommand slot; we don't auto-complete
-    // beyond that (no third-stage callback yet).
+    // 第二阶段：正在输入子命令。`head` 是命令本身（例如 "/mcp"），
+    // `tail` 是第一个空格后面的内容。第二个空格表示用户已经越过子命令槽位；
+    // 我们不会自动补全更后面的内容（还没有第三阶段回调）。
     const head = text.slice(0, firstSpace)
     const tail = text.slice(firstSpace + 1)
     if (tail.includes(' ')) return []
@@ -515,9 +505,9 @@ export function ChatInput({
   const safeIndex = matches.length > 0 ? completionIndex % matches.length : 0
   const currentMatch = matches.length > 0 ? matches[safeIndex] : null
 
-  // ── @-mention file completion ──
-  // detectAtToken is cheap; recompute every render so it tracks cursor
-  // moves (left/right arrows) without explicit invalidation.
+  // ── @ 提及文件补全 ──
+  // `detectAtToken` 的代价很低；每次 render 都重算，
+  // 这样它就能跟着光标移动（左右方向键）自动更新，不需要显式失效。
   const atTrigger = useMemo(() => detectAtToken(text, cursor), [text, cursor])
   const atMatches = useMemo(() => {
     if (!atTrigger.active) return [] as FileEntry[]
@@ -526,15 +516,14 @@ export function ChatInput({
   const safeAtIndex = atMatches.length > 0 ? atCompletionIndex % atMatches.length : 0
   const atDismissedKey = `${atTrigger.atIdx}:${atTrigger.query}`
   const atMenuVisible = atTrigger.active && atDismissed !== atDismissedKey
-  // Slash menu wins when both could fire (`/` only triggers at line start so
-  // they rarely collide — only via paste). Hard mutex prevents double-render.
+  // 如果两者都可能触发，slash 菜单优先（`/` 只会在行首触发，
+  // 所以它们很少冲突，通常只会发生在粘贴时）。
+  // 这里用硬互斥避免双重渲染。
   const activeMenu: 'slash' | 'at' | null = matches.length > 0 ? 'slash' : atMenuVisible ? 'at' : null
 
-  // Reset the @-menu cursor whenever the trigger token shifts so the
-  // highlight always starts at the top entry of the new result set.
-  // Uses the "store previous prop in state + setState during render"
-  // pattern from the React docs — preferred over useEffect because it
-  // avoids an extra commit and avoids react-hooks/set-state-in-effect.
+  // 每当触发 token 变化时，重置 @ 菜单光标，这样高亮总是从新结果集的第一项开始。
+  // 这里使用 React 文档里的“把上一个 prop 存进 state，并在 render 期间 setState”的模式。
+  // 比起 useEffect，它能少一次 commit，也不会触发 react-hooks/set-state-in-effect。
   // https://react.dev/reference/react/useState#storing-information-from-previous-renders
   const atTriggerKey = `${atTrigger.atIdx}:${atTrigger.query}:${atTrigger.active}`
   const [lastAtTriggerKey, setLastAtTriggerKey] = useState(atTriggerKey)
@@ -543,16 +532,13 @@ export function ChatInput({
     setAtCompletionIndex(0)
   }
 
-  /** Erase the frame region at its pinned location (last `lastFrameHRef`
-   *  rows of the terminal) and clear prevFrameRef. Returns the ANSI
-   *  sequence so callers can coalesce it with other writes into a single
-   *  process.stdout.write. Cursor ends at the top-left of the (now blank)
-   *  frame region.
+  /** 擦除 frame 在固定位置上的区域（终端最后 `lastFrameHRef` 行），并清空
+   *  prevFrameRef。返回 ANSI 序列，调用方可以把它和其他写入合并成一次
+   *  process.stdout.write。清理后光标会落到这块（现在是空白的）frame 区域左上角。
    *
-   *  Only used for unmount cleanup now — the live render path keeps the
-   *  frame PINNED at the bottom and uses DECSTBM scroll regions to insert
-   *  scrollback above it (see the flush effect below), so erasing is only
-   *  needed when the TUI itself is tearing down. */
+   *  现在它只用于 unmount 清理 —— 实时渲染路径会把 frame 牢牢钉在底部，
+   *  并通过 DECSTBM scroll region 在它上方插入 scrollback（见下面的 flush effect），
+   *  所以只有 TUI 自己要退出时才需要擦除。 */
   const buildEraseRegion = (): string => {
     const prevH = lastFrameHRef.current
     const prevTop = lastFrameTopRef.current
@@ -561,17 +547,16 @@ export function ChatInput({
     lastFrameTopRef.current = 0
     if (prevH <= 0) return ''
     const termRows = stdout?.rows ?? 25
-    // Use the actual last-rendered top, falling back to the bottom-anchor
-    // formula on the legacy path where lastFrameTopRef wasn't yet
-    // populated (would only matter for very early teardowns).
+    // 优先使用实际最后渲染的位置；如果是旧路径、`lastFrameTopRef` 还没填上，
+    // 才回退到底部锚定公式（那只会影响非常早期的 teardown）。
     const frameTop = prevTop > 0 ? prevTop : Math.max(1, termRows - prevH + 1)
-    // Jump to frame top, erase to end of display. One atomic wipe.
+    // 跳到 frame 顶部，擦到屏幕末尾。一次原子清除。
     return `\x1b[${frameTop};1H\x1b[J`
   }
 
-  /** Synchronous erase used by unmount cleanup. Wrapped in BSU/ESU so the
-   *  terminal renders the erase atomically. Effect path does its own
-   *  composition (already BSU/ESU-wrapped by the outer render). */
+  /** unmount 清理使用的同步擦除。
+   *  外面包了 BSU/ESU，这样终端会把这次擦除当作原子操作来渲染。
+   *  effect 路径会自己做组合（外层 render 已经包过 BSU/ESU 了）。 */
   const eraseRegion = () => {
     const s = buildEraseRegion()
     if (s) process.stdout.write(BSU + s + ESU_HIDE)
@@ -580,35 +565,33 @@ export function ChatInput({
   const handleSubmit = (override?: string) => {
     const raw = override ?? text
     if (!raw.trim()) return
-    // Block submit while the agent is still thinking. Keystrokes still flow
-    // (the keyboard stays enabled so users can pre-type the next prompt) —
-    // only Enter is suppressed, matching Claude Code's behavior.
+    // 在 agent 还在思考时阻止提交。键盘输入仍然会继续进来
+    //（键盘保持可用，所以用户可以提前输入下一条 prompt）——
+    // 这里只禁用 Enter，行为和 Claude Code 对齐。
     if (spinner) return
     const expanded = override ? raw : expandPasteRefs(raw, pastedContents)
-    // Record the pre-expansion form in input history (Up/Down recall) so
-    // that restoring an entry doesn't unfold the entire paste block back
-    // into the input box — `[#N +M lines]` refs stay compact, just like
-    // they were on submit. `override` is the slash-completion path
-    // (`handleSubmit('/help')` etc.) where there are no paste refs.
+    // 把展开前的形态记入输入历史（Up/Down 回忆），这样恢复条目时，
+    // 不会把整块 paste 再次展开回输入框里 —— `[#N +M lines]` 引用会保持紧凑，
+    // 跟提交时看到的一样。`override` 是 slash 补全路径
+    //（比如 `handleSubmit('/help')`），这里不会有 paste refs。
     pushHistory(override ? raw : text, override ? {} : pastedContents)
     resetHistoryNav()
-    // Let the normal render useEffect handle the transition. The next
-    // render sees `messages.length > writtenMessageCountRef` (user-echo
-    // just got appended inside onSubmit) and emits a single atomic
-    // BSU/ESU-wrapped payload of: gap-clear + scrollback content + frame
-    // redraw. No synchronous pre-erase here — that used to exist to
-    // make room for a now-retired separate MessageList writer, and was
-    // a second non-atomic flash on every submit.
+    // 让正常的 render useEffect 去处理这次状态迁移。
+    // 下一次 render 会看到 `messages.length > writtenMessageCountRef`
+    //（用户自己的回声已经在 onSubmit 里追加进来了），然后一次性输出
+    // 一个包在 BSU/ESU 里的原子 payload：清间隔 + scrollback 内容 + frame 重绘。
+    // 这里不再同步预擦除 —— 旧代码是给已经退役的独立 MessageList writer 腾位置的，
+    // 它在每次 submit 时都会额外闪一下。
     onSubmit(expanded)
     dispatch({ type: 'RESET' })
     setPastedContents({})
     setCompletionIndex(0)
   }
 
-  /** Move the cursor up/down by `delta` logical lines. Returns `true` if the
-   *  cursor actually moved, `false` if it was already at the top/bottom edge —
-   *  the falsy return is what lets the Up/Down handlers fall through to the
-   *  history-navigation path (same trick Claude Code's `upOrHistoryUp` uses). */
+  /** 按 `delta` 个逻辑行上下移动光标。
+   *  如果光标真的移动了就返回 `true`；如果它已经在顶部/底部边缘则返回 `false`。
+   *  这个 falsy 返回值正是让 Up/Down 处理器能继续落到 history 导航路径上的关键
+   *  （Claude Code 的 `upOrHistoryUp` 也是同样的思路）。 */
   const moveCursorVertically = (delta: number): boolean => {
     const lines = text.split('\n')
     let line = 0,

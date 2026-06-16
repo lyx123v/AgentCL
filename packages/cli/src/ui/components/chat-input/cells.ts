@@ -1,9 +1,9 @@
-// Cell representation + cell-builders for the cell-diff renderer.
+// cell 数据结构，以及给 cell-diff 渲染器用的 cell 构造函数。
 //
-// Each frame is a 2D grid of Cell. The diff loop in ChatInput.tsx walks
-// the grid and only emits SGR/text bytes for cells whose `(char, style)`
-// pair changed since the previous frame. `width` lets the diff loop
-// skip the trailing half of a CJK pair without re-emitting the glyph.
+// 每一帧都是一个二维 Cell 网格。ChatInput.tsx 里的 diff loop 会沿着网格
+// 遍历，只对和上一帧相比 `(char, style)` 发生变化的 cell 输出 SGR / 文本字节。
+// `width` 用来告诉 diff loop：如果一个 CJK 字符占了 2 列，就要跳过它右边那半格，
+// 避免重复输出同一个字形。
 import { charWidth } from '../../text-width.js'
 import { S_NONE } from './palette.js'
 
@@ -17,9 +17,10 @@ export function cellsEqual(a: Cell, b: Cell): boolean {
   return a.char === b.char && a.style === b.style
 }
 
-/** Render a row of cells to a single ANSI-styled string (no cursor moves,
- *  no trailing erase). Used by the scrollback-commit inline-stream path
- *  so frame rows can be emitted as part of the `content + frame` stream. */
+/** 把一整行 Cell 渲染成单个带 ANSI 样式的字符串。
+ *  不做光标移动，不做行尾擦除。
+ *  主要给 scrollback-commit 的 inline-stream 路径使用，这样 frame 行就能
+ *  作为 `content + frame` 的一部分直接输出。 */
 export function renderRowToAnsi(cells: Cell[]): string {
   let out = '\x1b[0m'
   let lastStyle = '\x1b[0m'
@@ -39,20 +40,18 @@ export function textToCells(text: string, style: string): Cell[] {
   return cells
 }
 
-/** Parse a string that already contains ANSI SGR escapes into Cell[]. Used
- *  by the select-options dialog's preview pane so a `/syntax` preview row
- *  built by render-diff (full of fg/bg color escapes) can be drawn into
- *  the cell buffer with each char carrying its correct active style.
+/** 把已经包含 ANSI SGR 转义的字符串解析成 Cell[]。
+ *  主要给 select-options 对话框的预览窗格使用，这样由 render-diff 生成的
+ *  `/syntax` 预览行（里面已经带了各种前景色 / 背景色 escape）就能被拆回
+ *  cell buffer，并且每个字符都保留它当下对应的样式。
  *
- *  Each cell's `style` is `\x1b[0m` followed by every SGR escape that's
- *  active at that point — the cell-diff emitter relies on each cell's
- *  style being self-contained (it just blits `cell.style` on transitions
- *  without first resetting), so we always lead with reset to wipe
- *  whatever the previous cell left in the terminal SGR state. SGR resets
- *  (`\x1b[0m` / `\x1b[m`) clear the active stack; non-reset escapes are
- *  appended (we don't bother diffing fg-vs-bg-vs-attr buckets, since
- *  ANSI itself handles late escapes overriding earlier ones — the row
- *  may emit a few redundant bytes, but it always renders correctly). */
+ *  每个 cell 的 `style` 都是 `\x1b[0m` 加上当前时刻仍然生效的全部 SGR escape。
+ *  cell-diff 发射器要求每个 cell 的样式本身就是自包含的（它只是在转场时直接
+ *  blit `cell.style`，不会先做一次统一 reset），所以这里必须先 reset，
+ *  把前一个 cell 留下来的终端状态清干净。SGR reset（`\x1b[0m` / `\x1b[m`）
+ *  会清掉当前激活栈；非 reset escape 则按顺序追加即可（我们不刻意区分
+ *  前景 / 背景 / 属性三类 bucket，因为 ANSI 自己会让后发的 escape 覆盖先发的）。
+ *  这样可能会发出少量冗余字节，但渲染一定正确。 */
 export function ansiTextToCells(text: string): Cell[] {
   const cells: Cell[] = []
   const active: string[] = []
@@ -63,7 +62,7 @@ export function ansiTextToCells(text: string): Cell[] {
       let j = i + 2
       while (j < text.length && !/[A-Za-z]/.test(text[j]!)) j++
       if (j >= text.length) {
-        // Unterminated — treat as literal and bail out of escape mode.
+        // 转义不完整：把它当作普通字符，退出 escape 解析状态。
         i++
         continue
       }
@@ -73,8 +72,8 @@ export function ansiTextToCells(text: string): Cell[] {
       } else if (/^\x1b\[[0-9;]*m$/.test(escape)) {
         active.push(escape)
       }
-      // Non-SGR CSI sequences are simply skipped — none should appear
-      // in our preview rows but we don't want them as visible text.
+      // 非 SGR 的 CSI 序列直接跳过。
+      // 预览行里理论上不该出现它们，但也不希望它们被当成可见文本。
       i = j + 1
       continue
     }

@@ -1,12 +1,12 @@
-// @x-code-cli/cli - 非交互式 plugin 子命令
+// @x-code-cli/cli - 非交互式 plugin 子命令。
 //
-// `xc plugin <subcommand> ...` 的入口——不挂载 Ink UI，
-// 直接向 stdout/stderr 打印，并以适合脚本使用的状态码退出。
-// 它和 `App.tsx` 里的 `handlePlugin` slash 命令族保持一致，
-// 这样用户可以从任一入口驱动同样的操作。
+// `xc plugin <subcommand> ...` 的入口，不挂载 Ink UI，
+// 而是直接向 stdout/stderr 打印，并以适合脚本使用的状态码退出。
+// 这里的命令集需要和 `App.tsx` 里的 `handlePlugin` slash 命令族保持一致，
+// 这样用户无论走 TUI 入口还是 shell 入口，都能执行同样的操作。
 //
-// 它会在 yargs 看到参数之前就从 index.ts 的 main() 分流出去，
-// 这样 `xc plugin install ./foo` 就不会被当成一段要让 agent 回答的 prompt。
+// 这里会在 yargs 解析参数之前就从 `index.ts` 的 `main()` 分流出去，
+// 这样 `xc plugin install ./foo` 就不会被误判成一段要交给 agent 处理的 prompt。
 import { Chalk } from 'chalk'
 
 import {
@@ -280,7 +280,7 @@ async function promptConsent(preview: ConsentPreview): Promise<boolean> {
 
   process.stderr.write(lines.join('\n'))
 
-  // No TTY → default deny. Scripts should pass `--yes`.
+  // 没有 TTY 时默认拒绝；脚本应显式传 `--yes`。
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
     process.stderr.write(chalk.yellow('No TTY — declining install. Use --yes to skip the prompt in scripts.\n'))
     return false
@@ -305,8 +305,8 @@ async function promptConsent(preview: ConsentPreview): Promise<boolean> {
 async function promptUserConfig(
   fields: Parameters<NonNullable<Parameters<typeof installPlugin>[0]['userConfigPrompt']>>[0],
 ): Promise<Record<string, string | number | boolean> | null> {
-  // installer only calls us when fields.length > 0, but TypeScript can't
-  // see that from the call site — guard explicitly.
+  // 安装器只有在 fields.length > 0 时才会调用这里，但 TypeScript
+  // 无法从调用点看出来，所以这里显式保护一下。
   if (!fields) return {}
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
     process.stderr.write(
@@ -327,21 +327,19 @@ async function promptUserConfig(
       const required = f.required ? ' (required)' : ''
       const defaultNote = f.default !== undefined ? ` [default: ${f.default}]` : ''
       const sensitive = f.sensitive === true
-      // When the manifest provides neither `prompt` nor `description`, the
-      // older code fell through to `f.key`, producing labels like
-      // `MY_URL: MY_URL [default: ...]` — the key duplicated as both the
-      // label *and* the human description. Just show the key alone in
-      // that case.
+      // 当 manifest 既没有 `prompt` 也没有 `description` 时，
+      // 旧代码会退回到 `f.key`，最终出现类似
+      // `MY_URL: MY_URL [default: ...]` 的标签，也就是把 key 同时当成
+      // 字段名和人类描述，显得重复。这里在这种情况下只显示 key 本身。
       const promptText = label
         ? `  ${chalk.cyan(f.key)}: ${label}${required}${defaultNote}\n  > `
         : `  ${chalk.cyan(f.key)}${required}${defaultNote}\n  > `
 
       let answer: string
       if (sensitive) {
-        // Suppress local echo for the duration of the read. Node's readline
-        // doesn't expose this directly, so we monkey-patch the output stream's
-        // write to drop everything except a one-off '*' per keystroke. Same
-        // technique inquirer uses for its `password` prompt.
+        // 在读取期间抑制本地回显。Node 的 readline 没有直接暴露这个能力，
+        // 所以这里只能临时 monkey-patch 输出流的 write，把内容过滤掉，
+        // 只保留每次按键对应的一次性 `*`。inquirer 的 `password` 提示也是类似思路。
         const out = process.stderr
         const originalWrite = out.write.bind(out)
         process.stderr.write(promptText)
@@ -459,8 +457,8 @@ async function cliUninstall(args: string[]): Promise<number> {
 }
 
 async function cliToggle(args: string[], enable: boolean): Promise<number> {
-  // Pull out the optional --scope flag before the positional id, matching
-  // the shape of /skill enable|disable. Default scope = 'user'.
+  // 先把可选的 `--scope` 标志从位置参数里剥离出来，和
+  // `/skill enable|disable` 的参数形状保持一致。默认作用域是 `user`。
   let scope: PluginScope = 'user'
   const positional: string[] = []
   for (const a of args) {
@@ -488,14 +486,13 @@ async function cliToggle(args: string[], enable: boolean): Promise<number> {
 }
 
 async function cliUpdate(args: string[]): Promise<number> {
-  // Two modes — explicit:
-  //   xc plugin update <id>   single plugin (existing behavior)
-  //   xc plugin update --all  every installed plugin, sequential, skip-on-error
+  // 这里有两种明确模式：
+  //   `xc plugin update <id>`   更新单个插件（现有行为）
+  //   `xc plugin update --all`  顺序更新所有已安装插件，出错则跳过继续
   //
-  // Bare `xc plugin update` is rejected on purpose. npm makes bare = all but
-  // that's exactly what bites users on typo / mid-session experimentation;
-  // Gemini CLI takes the same defensive stance. The error message offers
-  // both forms so the right choice is one keypress away.
+  // 故意拒绝裸写 `xc plugin update`。npm 常见的“裸命令 = 更新全部”虽然方便，
+  // 但也最容易在误输入或中途试验时伤到用户；Gemini CLI 也采取了同样的保守策略。
+  // 错误信息里把两种写法都列出来，方便用户一眼选对。
   const all = args.includes('--all') || args.includes('-a')
   const positional = args.filter((a) => a !== '--all' && a !== '-a')
 
@@ -581,9 +578,10 @@ async function cliSearch(args: string[]): Promise<number> {
   }
   const marketplaces = await readAllCachedMarketplaces()
   if (marketplaces.length === 0) {
-    // Distinguish "you haven't subscribed to any marketplace yet" from
-    // "you're subscribed but the cached index file is missing / unreadable".
-    // The fix is different — one needs `add`, the other needs `refresh`.
+    // 这里要区分两种情况：
+    // 1. 还没有订阅任何 marketplace；
+    // 2. 已经订阅了，但缓存索引文件缺失或不可读。
+    // 这两种情况对应的修复方式不同：前者要 `add`，后者要 `refresh`。
     const km = await readKnownMarketplaces()
     if (km.marketplaces.length === 0) {
       console.error('No subscribed marketplaces. Add one with `xc plugin marketplace add`.')

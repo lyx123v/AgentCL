@@ -1,7 +1,7 @@
-// Permission-dialog cell builders + `formatElapsed`.
+// 权限对话框的 cell 构建器 + `formatElapsed`。
 //
-// Lives outside ChatInput.tsx because the permission rendering is a
-// self-contained data → Cell[] mapping that has no React state.
+// 之所以放在 ChatInput.tsx 之外，是因为权限渲染本质上只是一个
+// 自包含的 data -> Cell[] 映射，不需要 React state。
 import { getPermissionLevel } from '@x-code-cli/core'
 
 import { GLYPH_ELLIPSIS } from '../../terminal-glyphs.js'
@@ -30,12 +30,11 @@ const PERMISSION_LEVEL_STYLE: Record<string, { label: string; style: string }> =
   deny: { label: 'dangerous', style: S_ERROR_BOLD },
 }
 
-/** One-line `key: value, key: value` summary of an MCP tool's input.
- *  Values are JSON-encoded so strings render with their quotes and
- *  nested objects stay readable; long ones get trimmed before the join
- *  so a single oversized field can't swallow every other key. The outer
- *  truncate-to-terminal-width in `permissionContentCells` then caps the
- *  whole row. */
+/** MCP 工具输入的一行式 `key: value, key: value` 摘要。
+ *  值会先做 JSON 编码，这样字符串会保留引号，嵌套对象也更容易读；
+ *  过长的值会在 join 前先截断，避免某个字段太大把其他 key 全吞掉。
+ *  最外层在 `permissionContentCells` 里还有一次按终端宽度截断，
+ *  用来兜住整行。 */
 export function mcpInputPreview(input: Record<string, unknown>): string {
   const keys = Object.keys(input)
   if (keys.length === 0) return '(no args)'
@@ -60,25 +59,23 @@ export function permissionContentCells(
   termWidth: number,
   mcp?: { serverName: string; rawName: string },
 ): Cell[] | null {
-  // Frame geometry assumes exactly ONE row per permission content line.
-  // When a string is longer than termWidth the terminal will auto-wrap it
-  // onto the next physical row, which breaks every downstream absolute
-  // cursor position (the Yes/No rows, the input separator, the prompt
-  // itself) — the dialog appears "half missing" with only the title
-  // visible. Truncate here so the cell matrix and the on-screen rows
-  // stay 1:1. Mirrors the tool-bubble preview truncation in the live
-  // tool-list rendering below.
+  // frame 几何假设每一行权限内容都只占一行。
+  // 如果字符串比 termWidth 长，终端会自动换行到下一物理行，
+  // 这会打乱后面所有绝对光标位置
+  //（Yes/No 行、输入分隔线、提示本身）——对话框就会像“只剩一半”，
+  // 只看到标题。
+  // 所以这里要截断，保证 cell matrix 和屏幕上的行数 1:1。
+  // 这和下面 live tool-list 里的 tool-bubble 预览截断是同一个思路。
   const truncateToWidth = (text: string, reservedCols: number): string => {
     const maxLen = Math.max(10, termWidth - reservedCols)
     return text.length > maxLen ? text.slice(0, maxLen - 1) + GLYPH_ELLIPSIS : text
   }
   if (mcp) {
-    // One-line `key: value, key: value` preview of the input. MCP tools
-    // can take arbitrary schemas, so we fall back to a generic serialiser
-    // rather than trying to guess "the important field". Empty input
-    // still renders the row (with `(no args)`) so the dialog height
-    // matches shell/edit and the always-allow row sits where the user
-    // expects it.
+    // 输入的一行式 `key: value, key: value` 预览。
+    // MCP 工具可以接受任意 schema，所以我们用通用序列化器兜底，
+    // 而不是去猜“哪个字段才是重点”。
+    // 空输入也要渲染这一行（显示 `(no args)`），这样对话框高度才能和
+    // shell/edit 对齐，always-allow 那一行也会出现在用户预期的位置。
     const preview = mcpInputPreview(input)
     const cells: Cell[] = []
     cells.push({ char: ' ', style: S_NONE, width: 1 })
@@ -120,8 +117,8 @@ export function permissionContentCells(
     return cells
   }
   if (toolName === 'enterPlanMode') {
-    // Plan-mode entry has no per-call input — describe the consequence
-    // so the user knows what Yes/No actually means.
+    // plan-mode 入口没有逐次调用输入 - 这里描述其后果，
+    // 这样用户就知道 Yes/No 到底意味着什么。
     const cells: Cell[] = []
     cells.push({ char: ' ', style: S_NONE, width: 1 })
     cells.push({ char: ' ', style: S_NONE, width: 1 })

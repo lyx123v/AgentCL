@@ -1,12 +1,11 @@
-// @x-code-cli/cli — /skill slash command handler.
+// @x-code-cli/cli - /skill 斜杠命令处理器。
 //
-// Extracted from App.tsx via a factory that closes over the deps each
-// subcommand needs: registry access (read + reload), settings writers,
-// prompt-cache invalidation, and the pending-skill ref. Returns the
-// handler function the dispatcher in App.tsx calls.
+// 这个处理器是从 App.tsx 里抽出来的工厂函数，闭包捕获了各个子命令需要的依赖：
+// registry 访问（读取 + 重新加载）、设置写入、prompt cache 失效处理，以及
+// pending-skill 引用。最后返回给 App.tsx 里的分发器调用。
 //
-// Subcommands: install / list / refresh / disable / enable / uninstall.
-// Unknown subs print the usage hint.
+// 支持的子命令：install / list / refresh / disable / enable / uninstall。
+// 不认识的子命令会输出使用提示。
 import fs from 'node:fs/promises'
 import path from 'node:path'
 
@@ -27,18 +26,19 @@ export interface SkillCommandDeps {
   bumpSkillRegistryVersion: () => void
 }
 
-/** Minimal YAML name extractor for SKILL.md frontmatter.
- *  Only needs to find `name: <value>` — full parse happens in the loader. */
+/** SKILL.md frontmatter 的最小 YAML 名称提取器。
+ *  这里只需要找到 `name: <value>`，完整解析交给加载器。 */
 function extractSkillName(content: string): string | null {
   const match = content.match(/^---\r?\n[\s\S]*?^name:\s*["']?([^"'\r\n]+)["']?\s*$/m)
   return match ? match[1].trim() : null
 }
 
-/** Split a skill argument into `(name, scope)`, recognizing
- *  `--scope=user` / `--scope=project` / `-s=user` etc. Bare arg with
- *  no flag returns `scope: undefined` so the caller can default off the
- *  skill's source. Unknown scope strings are ignored (scope stays
- *  undefined) — keeps the parser permissive. */
+/** 把 skill 参数拆成 `(name, scope)`，支持识别
+ *  `--scope=user` / `--scope=project` / `-s=user` 等写法。
+ *  如果只有裸参数、没有 scope 标记，就返回 `scope: undefined`，
+ *  让调用方根据 skill 的来源自己决定默认范围。
+ *  不认识的 scope 字符串会被忽略（scope 继续保持 undefined）——
+ *  这样解析器会更宽松。 */
 function parseSkillScopeFlag(arg: string): { name: string; scope?: SkillSettingsScope } {
   const tokens = arg.split(/\s+/).filter(Boolean)
   let scope: SkillSettingsScope | undefined
@@ -131,22 +131,19 @@ export function createSkillCommandHandler(deps: SkillCommandDeps) {
         addCommandMessage(text, `Failed to reload skills: ${err instanceof Error ? err.message : String(err)}`)
         return
       }
-      // Invalidate prompt cache: both the system prompt's `## Available
-      // Skills` block and the activateSkill tool description embed the
-      // skill list. Better to take one cache miss than to send a stale
-      // skill surface to the model. Same trade /mcp refresh makes.
+      // 失效 prompt cache：系统 prompt 里的 `## Available Skills` 区块
+      // 和 activateSkill 工具描述都嵌入了 skill 列表。宁可让缓存 miss 一次，
+      // 也不要把过期的 skill 面暴露给模型。/mcp refresh 也是同样的权衡。
       invalidateSystemPromptCache()
-      // Drop a pending skill if the user `/<skillname>` for a skill that
-      // was just removed or disabled — otherwise the next plain user
-      // message would inject orphaned skill content.
+      // 如果用户刚刚触发的 `/<skillname>` 对应的 skill 已经被移除或禁用，
+      // 就把 pending skill 清掉。否则下一条普通用户消息会注入一段孤儿 skill 内容。
       const pending = pendingSkillRef.current
       if (pending && !options.skillRegistry.get(pending.name)) {
         pendingSkillRef.current = null
       }
-      // Force the slash-command tab completion + /help list to re-memo
-      // off the new skill set. The registry object identity is stable
-      // (reload() mutates in place), so the version counter is the
-      // signal React needs to recompute the memoized list.
+      // 强制斜杠命令的 tab completion 和 /help 列表重新基于新的 skill 集合做 memo。
+      // registry 对象本身的身份是稳定的（reload() 是原地修改），所以这里需要一个
+      // version counter 来告诉 React 该重新计算缓存列表了。
       bumpSkillRegistryVersion()
 
       const summaryParts: string[] = []
@@ -156,9 +153,9 @@ export function createSkillCommandHandler(deps: SkillCommandDeps) {
       if (summary.unchanged.length) summaryParts.push(`unchanged: ${summary.unchanged.join(', ')}`)
       if (summaryParts.length === 0) summaryParts.push('no skills found')
       const lines = [`Reloaded skills — ${summaryParts.join('; ')}.`]
-      // Tight `\n` between primary result and the advisory note — matches the
-      // pattern used by /mcp refresh and the rest of /skill install / disable /
-      // enable / remove. No blank line within a single command's result block.
+      // 主结果和提示说明之间只留一个紧凑的 `\n`，和 /mcp refresh 以及
+      // /skill install / disable / enable / remove 的输出风格保持一致。
+      // 单个命令结果块内部不额外空一行。
       lines.push('Note: next message rebuilds the system prompt, so prompt-cache will miss once.')
       addCommandMessage(text, lines.join('\n'))
       return
@@ -179,11 +176,11 @@ export function createSkillCommandHandler(deps: SkillCommandDeps) {
         )
         return
       }
-      // Default the disable scope to the skill's own source so users get the
-      // expected "disable the project skill yansu" without typing --scope.
-      // Re-enable is symmetric: clear from the source scope first; if the
-      // skill is still effectively disabled it's because the OTHER scope
-      // also lists it, and we'll surface that.
+      // 默认把 disable 的 scope 设成 skill 自己的来源，这样用户输入
+      // “禁用 project skill yansu” 时不用额外写 `--scope`。
+      // enable 的逻辑是对称的：先把来源 scope 里的禁用项清掉；如果 skill
+      // 仍然处于有效禁用状态，那就说明另一个 scope 里也列了它，
+      // 我们会把这个情况提示出来。
       const effectiveScope: SkillSettingsScope = scope ?? entry.source
       const disable = sub === 'disable'
       let result: 'changed' | 'noop'
@@ -203,9 +200,9 @@ export function createSkillCommandHandler(deps: SkillCommandDeps) {
         )
         return
       }
-      // After re-enable, check whether the other scope is still hiding it
-      // — common pitfall when the user disables at user scope and then expects
-      // a project-level enable to revive it.
+      // re-enable 之后，检查另一个 scope 是否还在隐藏它。
+      // 这是个常见坑：用户先在 user scope 禁用，再期待 project scope 的 enable
+      // 能把它救回来，但如果另一个 scope 里也列着，这样其实不会生效。
       let otherScopeNote = ''
       if (!disable) {
         const other: SkillSettingsScope = effectiveScope === 'user' ? 'project' : 'user'
@@ -215,7 +212,7 @@ export function createSkillCommandHandler(deps: SkillCommandDeps) {
             otherScopeNote = `\n_Note: \`${bareName}\` is also listed in ${other} settings (\`${skillSettingsPath(other)}\`). Run \`/skill enable ${bareName} --scope=${other}\` to fully re-enable._`
           }
         } catch {
-          // best-effort hint — silent failure is fine
+          // 尽力给提示即可，失败就静默忽略
         }
       }
       const verb = disable ? 'Disabled' : 'Enabled'
@@ -237,10 +234,10 @@ export function createSkillCommandHandler(deps: SkillCommandDeps) {
         addCommandMessage(text, `No skill named \`${name}\` is loaded. Run \`/skill list\` to see available skills.`)
         return
       }
-      // Plugin-contributed skills live under the plugin's cache dir, not
-      // under <baseDir>/skills/. `/skill uninstall` here would compute the
-      // wrong path and either no-op silently or remove an unrelated dir
-      // — redirect the user to `/plugin uninstall` instead.
+      // 插件贡献的 skill 实际放在插件自己的 cache 目录里，而不是
+      // <baseDir>/skills/。这里直接跑 `/skill uninstall` 会算错路径，
+      // 要么静默无操作，要么误删别的目录，所以要把用户导向
+      // `/plugin uninstall`。
       if (entry.pluginId) {
         addCommandMessage(
           text,
@@ -256,14 +253,14 @@ export function createSkillCommandHandler(deps: SkillCommandDeps) {
         addCommandMessage(text, `Failed to remove \`${skillDir}\`: ${err instanceof Error ? err.message : String(err)}`)
         return
       }
-      // Also clear any disable entries — leaving stale entries pointing
-      // at an uninstalled skill would silently swallow a future re-install
-      // with the same name (it'd come back disabled).
+      // 同时清掉所有 disable 记录。
+      // 不然这些指向已卸载 skill 的旧条目会把未来同名重装悄悄吞掉，
+      // 导致它“装回来了但还是被禁用”。
       try {
         await setSkillDisabled(name, 'user', false)
         await setSkillDisabled(name, 'project', false)
       } catch {
-        // best-effort — main rm already succeeded
+        // 尽力而为即可 - 主要的 rm 已经成功了
       }
       addCommandMessage(
         text,

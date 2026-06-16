@@ -1,4 +1,4 @@
-// @x-code-cli/cli - CLI 入口文件
+// @x-code-cli/cli - CLI 入口文件。
 import { Chalk } from 'chalk'
 import { hideBin } from 'yargs/helpers'
 
@@ -45,7 +45,7 @@ import { getThemeColors, parseThemeName, setTheme } from './ui/theme.js'
 // 带进 scrollback。常见来源包括：
 // `responseFormat JSON schema is used in a compatibility mode`
 // （例如 DeepSeek + structured-output 组合）、provider 能力降级等。
-// 开启 DEBUG_STDOUT 时会写入 ~/.x-code/logs/debug.log，不开启则静默丢弃。
+// 开启 DEBUG_STDOUT 时会写入 `~/.x-code/logs/debug.log`，不开启则静默丢弃。
 //
 // 这一段必须在任何 AI SDK 调用之前执行，所以放在模块顶层，
 // 甚至要早于 yargs 解析 argv。
@@ -85,20 +85,20 @@ function checkNodeVersion(): void {
 // 单次 Ctrl+C 的标准退出路径：
 //   waitUntilExit() → gracefulShutdown() → resetTerminal → process.exit(0)
 //
-// 会话保存是 fire-and-forget，不等待完成，以免阻塞退出。
+// 会话保存采用 fire-and-forget，不等待完成，以免阻塞退出。
 // 退出时不打印 token 用量汇总，因为我们对比过的几个 CLI
 //（claude-code、codex、gemini-cli、opencode）都没有这么做；
 // 而且 stdout 的延迟刷新容易让这类信息跑到 shell prompt 后面，
 // 反而会让用户困惑。
 let shutdownInProgress = false
-/** 启动时捕获，方便 gracefulShutdown 在退出前关闭 MCP server。
+/** 启动时捕获，方便 `gracefulShutdown` 在退出前关闭 MCP server。
  *  这里包括结束 stdio 子进程、终止 HTTP transport 等。
  *  如果不做这一步，stdio server 会一直挂到它自己发现父进程 stdin
  *  已经关闭为止。那通常也能工作，但显式关闭更快，也更符合预期。 */
 let mcpRegistryForShutdown: McpRegistry | null = null
-/** 启动时保存 plugin hook bus，方便 gracefulShutdown 在进程退出前
+/** 启动时保存 plugin hook bus，方便 `gracefulShutdown` 在进程退出前
  *  触发 `SessionEnd` 给插件 hook。
- *  同样是 fire-and-forget，1 秒的退出宽限时间就是慢 hook 和硬杀进程之间
+ *  同样采用 fire-and-forget，1 秒的退出宽限时间就是慢 hook 和硬杀进程之间
  *  的缓冲带。 */
 let hookBusForShutdown: HookBus | null = null
 
@@ -108,14 +108,14 @@ let hookBusForShutdown: HookBus | null = null
 function resetTerminal(): void {
   if (!process.stdout.isTTY) return
   try {
-    fs.writeSync(1, '\x1b[0m') // 重置 SGR（颜色、粗体、反显等），避免 shell prompt 继承样式
-    fs.writeSync(1, '\x1b[?2004l') // 关闭 bracketed paste
-    fs.writeSync(1, '\x1b[?25h') // 显示光标
-    fs.writeSync(1, '\x1b[?1049l') // 退出 alt screen（如果曾进入）
-    fs.writeSync(1, '\r\n') // 让 shell prompt 落到新的一行
+    fs.writeSync(1, '\x1b[0m') // 重置 SGR（颜色、粗体、反显等），避免 shell prompt 继承样式。
+    fs.writeSync(1, '\x1b[?2004l') // 关闭 bracketed paste。
+    fs.writeSync(1, '\x1b[?25h') // 显示光标。
+    fs.writeSync(1, '\x1b[?1049l') // 退出 alt screen（如果曾进入过）。
+    fs.writeSync(1, '\r\n') // 让 shell prompt 落到新的一行。
     if (process.stdin.isTTY) process.stdin.setRawMode(false)
   } catch {
-    // 终端可能已经关闭（SIGHUP、SSH 断开）——忽略即可。
+    // 终端可能已经关闭（SIGHUP、SSH 断开），这里直接忽略即可。
   }
 }
 
@@ -123,40 +123,37 @@ async function gracefulShutdown(exitCode: number): Promise<never> {
   if (shutdownInProgress) return undefined as never
   shutdownInProgress = true
 
-  // Kick off cleanup as best-effort in the background, but don't block the
-  // exit on it. saveSession internally calls the model to generate a summary
-  // which can take seconds — that was the "press Ctrl+C and wait 2-5 seconds"
-  // UX problem. None of the competitors (claude-code, gemini-cli, opencode,
-  // codex) make users wait for anything on exit; we align with them.
+  // 在后台尽力做清理，但不要让退出等待这些清理完成。
+  // `saveSession` 内部会调用模型生成摘要，这一步可能要花好几秒，
+  // 这就是之前“按 Ctrl+C 后还得等 2-5 秒”的体验问题。
+  // 我们参考的几个 CLI（claude-code、gemini-cli、opencode、codex）都不会
+  // 让用户在退出时等待，所以这里也对齐这个策略。
   //
-  // Consequence: if the process exits before saveSession's file write lands,
-  // that session isn't saved. Acceptable trade-off given users care far more
-  // about exit speed than about session summaries. A future improvement is
-  // incremental saves during the session (opencode's approach).
+  // 代价是：如果进程在 `saveSession` 的写文件动作落盘前就退出了，这次会话就不会保存。
+  // 这个权衡是可以接受的，因为用户显然更在意退出速度，而不是每次都保住会话摘要。
+  // 后续可以考虑像 opencode 那样，在会话过程中做增量保存。
   const cleanup = getCleanupFn()
   if (cleanup) cleanup().catch(() => undefined)
 
-  // Fire-and-forget MCP shutdown. Stdio servers also clean themselves up
-  // when their stdin closes, so even if process.exit beats this promise
-  // the OS reaps the children — this just makes it explicit / faster.
+  // MCP 关闭也采用 fire-and-forget。stdio server 在 stdin 关闭时也会自行收尾，
+  // 所以即便 `process.exit` 抢在这个 promise 前面，操作系统也会回收子进程；
+  // 这里只是把这个过程显式化并尽量加快。
   if (mcpRegistryForShutdown) {
     mcpRegistryForShutdown.shutdown().catch(() => undefined)
   }
 
-  // Plugin SessionEnd hooks. Fire-and-forget — we don't await because
-  // a slow hook would block the user's shell prompt from returning,
-  // and the exit-time grace is a small window anyway. Hooks needing
-  // guaranteed delivery should also subscribe to TurnComplete.
+  // 插件的 SessionEnd hook 也不等待完成。因为慢 hook 会阻塞 shell prompt 返回，
+  // 而退出阶段的宽限窗口本来就很小。需要更可靠交付的 hook 应该同时订阅
+  // TurnComplete。
   if (hookBusForShutdown?.has('SessionEnd')) {
     hookBusForShutdown.emit({ name: 'SessionEnd', session: { cwd: process.cwd(), modelId: '' } }).catch(() => undefined)
   }
 
   resetTerminal()
-  // Print AFTER resetTerminal so the line lands cleanly above the
-  // shell prompt — colors are reset, raw mode is off, cursor is
-  // visible. The hint reads from a synchronously-captured snapshot
-  // (registered by App via onSessionInfoReady), so we don't depend
-  // on the still-running async cleanup.
+  // 一定要在 `resetTerminal` 之后再打印，这样提示行才能干净地落在 shell prompt 之上。
+  // 此时颜色已重置、raw mode 已关闭、光标也可见。
+  // 这个提示读取的是同步捕获的快照（由 App 通过 `onSessionInfoReady` 注册），
+  // 所以不会依赖仍在后台跑的异步清理。
   printResumeHint()
   process.exit(exitCode)
 }
@@ -165,27 +162,26 @@ async function main() {
   checkNodeVersion()
   loadEnvFile()
 
-  // Fire-and-forget update check — queries npm registry (with 24h disk
-  // cache) and prints a one-line hint if a newer version exists. Never
-  // blocks startup or throws. Suppressed for --print and non-TTY.
+  // 更新检查也采用 fire-and-forget：查询 npm registry（带 24 小时磁盘缓存），
+  // 如果发现新版本就打印一行提示。它永远不会阻塞启动，也不会向外抛错。
+  // 在 `--print` 和非 TTY 场景下会被抑制。
   void checkForUpdate().catch(() => undefined)
 
-  // Non-interactive plugin management subcommand. Routed BEFORE yargs
-  // parses the rest of argv — otherwise `xc plugin install ./foo`
-  // would be treated as a prompt the agent should respond to. This
-  // runs without mounting Ink and exits when done.
+  // 非交互式插件管理子命令。这里必须在 yargs 解析剩余 argv 之前先分流，
+  // 否则 `xc plugin install ./foo` 会被当成 agent 需要响应的 prompt。
+  // 这个分支不会挂载 Ink，执行完就直接退出。
   const rawArgs = hideBin(process.argv)
   if (rawArgs[0] === 'plugin') {
     const exitCode = await runPluginCli(rawArgs.slice(1))
     process.exit(exitCode)
   }
 
-  // Parse CLI arguments
+  // 解析 CLI 参数。
   const argv = await parseCliArgs()
 
   const prompt = (argv._ as string[]).join(' ') || undefined
 
-  // Check for stdin pipe input
+  // 检查 stdin 是否有管道输入。
   let stdinContent = ''
   if (!process.stdin.isTTY) {
     stdinContent = await readStdin()
@@ -193,18 +189,18 @@ async function main() {
 
   const availableProviders = getAvailableProviders()
 
-  // If no providers configured, show helpful message and exit
+  // 如果没有配置任何 provider，就显示帮助信息并退出。
   if (availableProviders.length === 0) {
     printNoApiKeyMessage()
-    // Exit 0: this is a user-configuration hint, not a crash.
-    // Non-zero would make `pnpm dev` pile on ERR_PNPM_RECURSIVE_RUN_FIRST_FAIL / ELIFECYCLE noise.
+    // 这里要以 0 退出：这是一个用户配置提示，不是崩溃。
+    // 如果返回非 0，`pnpm dev` 会额外堆出 ERR_PNPM_RECURSIVE_RUN_FIRST_FAIL / ELIFECYCLE 噪音。
     process.exit(0)
   }
 
-  // Resolve model
+  // 解析模型。
   let modelId = resolveModelId(argv.model)
   if (!modelId) {
-    // User specified a model whose provider has no key
+    // 用户指定了一个 provider 没有 key 的模型。
     const requested = argv.model
     if (requested) {
       const provider = requested.split(':')[0]
@@ -217,14 +213,13 @@ async function main() {
     }
   }
 
-  // Guard against stale model ids whose provider isn't registered for this
-  // launch — common when the user removes an env key but config.json still
-  // points there, or when a provider was dropped from the build entirely
-  // (e.g. kimicode after a feature revert). The registry would otherwise
-  // throw NoSuchProviderError at `languageModel()` and fatal-exit before
-  // the UI even mounts. For explicit `--model` we still hard-fail (the
-  // user's intent is unambiguous); for persisted / smart-default ids we
-  // fall back to the first available provider so the CLI stays usable.
+  // 防止使用过期的 model id，而这个 id 对应的 provider 在本次启动里并没有注册。
+  // 这种情况很常见：比如用户删掉了某个 env key，但 config.json 仍然指向它；
+  // 又或者某个 provider 在构建里被彻底移除了（例如特性回退后）。
+  // 否则 registry 会在 `languageModel()` 处抛出 NoSuchProviderError，
+  // 甚至在 UI 挂载前就直接 fatal exit。
+  // 对显式传入的 `--model` 我们仍然硬失败，因为用户意图很明确；
+  // 对持久化 / 智能默认值则回退到第一个可用 provider，保证 CLI 还能继续用。
   const requestedProvider = modelId.split(':')[0]
   if (!availableProviders.includes(requestedProvider)) {
     const envVar = getEnvVarName(requestedProvider) ?? `${requestedProvider.toUpperCase()}_API_KEY`
@@ -234,8 +229,8 @@ async function main() {
     }
     const fallback = PROVIDER_DETECTION_ORDER.find(({ envKey }) => process.env[envKey])
     if (!fallback) {
-      // Defensive: availableProviders was non-empty above, so something
-      // configured got us here — surface and exit cleanly.
+      // 防御性分支：上面明明已经确认 availableProviders 非空，
+      // 还能走到这里说明配置状态有点异常。这里把问题暴露出来，然后干净退出。
       printNoApiKeyMessage()
       process.exit(0)
     }
@@ -248,14 +243,12 @@ async function main() {
     modelId = fallback.defaultModel
   }
 
-  // Apply persisted UI theme. Done early (before startApp) so the very
-  // first scrollback row — including any messages we hydrate from a
-  // resumed session containing edit / write tool calls — already paints
-  // under the user's chosen theme (diff bg + syntax palette). Unknown
-  // values (stale config, hand-edited file) silently fall back to the
-  // default. The selected theme drives BOTH the diff bg colors (read
-  // by render-diff.ts at render time) and the syntax-highlight palette
-  // (set globally on the syntax-highlight module).
+  // 尽早应用持久化 UI 主题（在 `startApp` 之前），这样第一行 scrollback
+  // 就能直接按照用户选择的主题绘制。这里包括从恢复会话里注入的历史消息，
+  // 比如 edit / write 工具调用，也会一开始就落在正确的 diff 背景和语法色板下。
+  // 不认识的值（过期配置、手工编辑错误）会静默回退到默认主题。
+  // 这个主题同时会影响两处：一是 `render-diff.ts` 渲染时读取的 diff 背景色，
+  // 二是全局 `syntax-highlight` 模块使用的语法高亮色板。
   {
     const t = parseThemeName(loadUserConfig().theme)
     if (t !== null) {
@@ -264,36 +257,34 @@ async function main() {
     }
   }
 
-  // Create registries and get model
+  // 创建各类 registry，并拿到模型实例。
   const providerRegistry = createModelRegistry()
   const model = providerRegistry.languageModel(modelId as `${string}:${string}`)
 
-  // --plugin-debug / XC_PLUGIN_DEBUG=1: mirror plugin/hook/marketplace
-  // debugLog breadcrumbs to stderr so they're visible live without
-  // tailing ~/.x-code/logs/debug.log. Install BEFORE ensureDefaultMarketplaces
-  // so first-run subscribe messages show up too. Done as a global hook on
-  // debugLog rather than a new logger — keeps every existing call site
-  // automatic and avoids two parallel logging paths.
+  // `--plugin-debug` / `XC_PLUGIN_DEBUG=1`：把 plugin / hook / marketplace 的
+  // debugLog 足迹镜像到 stderr，这样不必 tail `~/.x-code/logs/debug.log`
+  // 也能实时看到。这个开关要在 `ensureDefaultMarketplaces` 之前安装，
+  // 这样首次运行的订阅提示也能显示出来。
+  // 这里选择给 debugLog 加全局 hook，而不是新建一个 logger，
+  // 这样现有调用点就不用改，也不会出现两条并行日志路径。
   if (argv['plugin-debug'] || process.env.XC_PLUGIN_DEBUG === '1') {
     setPluginDebugMirror(true)
   }
 
-  // First-run seed: writes the default `anthropic-marketplace`
-  // subscription to known_marketplaces.json if no subscription file
-  // exists yet. Idempotent — a user who explicitly removed the
-  // subscription won't get it back. Done before loadAllPlugins so the
-  // first run sees a populated marketplaces list.
+  // 首次运行种子：如果还没有订阅文件，就把默认的 `anthropic-marketplace`
+  // 订阅写入 `known_marketplaces.json`。这一步是幂等的，
+  // 用户如果明确删掉了这个订阅，不会被自动加回来。
+  // 要在 `loadAllPlugins` 之前做，这样第一次运行时就能看到一个有内容的 marketplace 列表。
   if (argv.plugins !== false) {
     await ensureDefaultMarketplaces().catch((err) => debugLog('plugins.ensure-defaults-failed', String(err)))
   }
 
-  // Plugins must load BEFORE skill / sub-agent / mcp registries so their
-  // contributions can be folded into each. `--no-plugins` short-circuits
-  // the entire chain. We surface non-fatal load errors to stderr in the
-  // same style as `[mcp] config error in ...` below — one broken plugin
-  // never blocks the others. Detailed diagnostics (collisions, unsupported
-  // commands, hook errors) go to debug.log via
-  // debugLogIntegrationDiagnostics for `/plugin doctor` to surface.
+  // 插件必须先于 skill / sub-agent / mcp registry 加载，这样它们的贡献才能被折叠进去。
+  // `--no-plugins` 会直接跳过整条链路。
+  // 这里把非致命加载错误以 stderr 的形式暴露出来，风格和下面的
+  // `[mcp] config error in ...` 保持一致：一个坏插件不能挡住其他插件。
+  // 更详细的诊断信息（冲突、不支持的命令、hook 错误）会写入 debug.log，
+  // 供 `/plugin doctor` 再来展开。
   const pluginLoad = await loadAllPlugins({ cwd: process.cwd(), disabled: argv.plugins === false })
   for (const e of pluginLoad.registry.loadErrors()) {
     console.error(chalk.yellow(`[plugin] ${e.id ?? e.path}: ${e.message}`))
@@ -310,33 +301,29 @@ async function main() {
   const skillRegistry = await createSkillRegistry({ extraDirs: pluginIntegration.skillsDirs })
   const commandRegistry = await createCommandRegistry({ extraDirs: pluginIntegration.commandsDirs })
 
-  // MCP: load servers, run trust dialog if project-level config is
-  // unfamiliar. Done BEFORE Ink mounts so the readline-based trust
-  // prompt has a clean terminal. The MCP machinery is opt-in: a user
-  // with no mcpServers in their config pays a single fs.stat (one for
-  // user config, one for project config) and that's it.
+  // MCP：加载服务器，如果项目级配置不熟悉，就运行信任对话框。
+  // 这一步要在 Ink 挂载之前完成，这样基于 readline 的信任提示才能拿到一个干净的终端。
+  // MCP 机制是按需启用的：如果用户配置里没有 mcpServers，
+  // 只会付出一次 fs.stat 的成本（用户配置一次、项目配置一次）就结束。
   const tokenStorage = getTokenStorage()
   const mcpPermissionStore = new McpPermissionStore()
   const mcpLoadResult = await loadMcpFromDisk({
     cwd: process.cwd(),
     extraServers: pluginIntegration.mcpServers,
     askUser: (question, opts) => askInTerminal(question, opts),
-    // The browser-open hook only fires during /mcp auth (passive boot
-    // mode never invokes redirectToAuthorization — see
-    // McpOAuthProvider.redirectToAuthorization). The /mcp auth handler
-    // in App.tsx already surfaces the URL via addCommandResult; writing
-    // ANOTHER copy here via console.error would land in stderr and
-    // corrupt ChatInput's cell frame (the `[` glyph collides with the
-    // bottom separator of the input box). Send it to the debug log so
-    // it's still recoverable for support.
+    // browser-open hook 只会在 `/mcp auth` 期间触发；被动启动模式不会调用
+    // `redirectToAuthorization`，见 `McpOAuthProvider.redirectToAuthorization`。
+    // `App.tsx` 里的 `/mcp auth` 处理器已经通过 `addCommandResult` 把 URL 展示出来了；
+    // 如果这里再用 `console.error` 打一份，会直接落进 stderr，破坏 ChatInput 的 cell frame。
+    // 这里把它写进 debug log，既能保留排障线索，又不会污染界面。
     oauthProviderFor: createOAuthProviderFactory(tokenStorage, (server, url) => {
       debugLog('mcp.open-browser', `${server}: ${url}`)
     }),
     onExitRequested: () => process.exit(0),
   })
   mcpRegistryForShutdown = mcpLoadResult.registry
-  // Don't fire SessionEnd hooks when --no-hooks is set — the user
-  // explicitly opted out of all hook execution this session.
+  // 当设置了 `--no-hooks` 时，不触发 SessionEnd hook。
+  // 这是用户在本次会话里明确选择了退出所有 hook 执行。
   hookBusForShutdown = argv.hooks === false ? null : pluginIntegration.hookBus
 
   if (mcpLoadResult.configErrors.length > 0) {
@@ -347,8 +334,7 @@ async function main() {
   if (mcpLoadResult.projectSkipped) {
     console.error(chalk.yellow(`[mcp] Project-level MCP servers skipped (not trusted).`))
   }
-  // Preload the always-allow list so the first tool call doesn't pay
-  // the file-read latency.
+  // 预加载 always-allow 列表，避免第一次工具调用时再承受一次文件读取延迟。
   await mcpPermissionStore.preload()
 
   const options: AgentOptions = {
@@ -356,59 +342,54 @@ async function main() {
     trustMode: argv.trust,
     printMode: argv.print,
     maxTurns: argv['max-turns'],
-    // Read the persisted /thinking toggle from disk. Default false so a
-    // launch on a config-less machine matches the pre-feature baseline
-    // (provider-default thinking behavior, no surprise latency / cost
-    // jumps). The /thinking command in App.tsx hot-swaps this flag
-    // without restart via useAgent's setThinking.
+    // 从磁盘读取持久化的 `/thinking` 开关。默认值设为 false，
+    // 这样在没有配置文件的机器上启动时，行为就和这个功能上线前保持一致
+    //（使用 provider 默认的 thinking 行为，不会突然出现额外的延迟 / 成本）。
+    // `App.tsx` 里的 `/thinking` 命令会通过 `useAgent` 的 `setThinking`
+    // 在不重启的情况下热切换这个标记。
     thinking: loadUserConfig().thinking ?? false,
-    // Plan mode is session-scoped (matches Claude Code) — only the
-    // `--plan` CLI flag opts in at startup. Mid-session toggles via
-    // /plan don't persist, so each new launch starts in 'default'
-    // unless explicitly requested.
+    // Plan 模式是“会话级”的（和 Claude Code 一致）——只有启动时传入
+    // `--plan` 才算显式开启。会话中途通过 `/plan` 切换不会持久化，
+    // 所以下一次启动仍然会回到 `default`，除非用户再次明确指定。
     permissionMode: argv.plan ? 'plan' : 'default',
     modelRegistry: providerRegistry,
     subAgentRegistry,
     skillRegistry,
     mcpRegistry: mcpLoadResult.registry,
     mcpPermissionStore,
-    // --no-plugins: leave pluginRegistry undefined so the /plugin slash
-    // commands can render "Plugin system is disabled..." instead of
-    // falling through to the generic empty-state ("No plugins installed").
-    // loadAllPlugins with disabled:true still returns a (non-null) empty
-    // registry, so we have to drop it here at the wire-up site rather
-    // than rely on the load result alone.
+    // `--no-plugins`：把 pluginRegistry 留空，这样 `/plugin` slash 命令
+    // 才能渲染“Plugin system is disabled...”之类的专门提示，
+    // 而不是退回到通用空状态（`No plugins installed`）。
+    // `loadAllPlugins` 即便传了 `disabled:true` 也还是会返回一个非空的空 registry，
+    // 所以这里必须在接线处把它丢掉，不能只依赖 load 的结果。
     pluginRegistry: argv.plugins === false ? undefined : pluginLoad.registry,
     commandRegistry,
-    // --no-hooks: swap in an empty bus so emit-sites are no-ops without
-    // touching the rest of plugin loading (skills / agents / mcp still
-    // register, just nothing listens on lifecycle events).
+    // `--no-hooks`：换成一个空 bus，让所有 emit 位置都变成 no-op，
+    // 但不影响插件加载的其余部分（skills / agents / mcp 仍然会注册，
+    // 只是没有东西监听生命周期事件）。
     hookBus: argv.hooks === false ? emptyHookBus() : pluginIntegration.hookBus,
   }
 
-  // Plugin SessionStart hooks. Fired at CLI launch so the hook can do
-  // setup (env validation, context warm-up, etc.) BEFORE the user starts
-  // interacting. Previously this lived in agentLoop's first-call branch,
-  // which meant a session ending without any user message (e.g. the user
-  // runs only slash commands then exits) never fired SessionStart, and
-  // sessions that did fire saw it lag behind the first prompt. Symmetric
-  // with the SessionEnd fire in `gracefulShutdown`. Fire-and-forget — a
-  // slow hook must not block startup.
+  // 插件的 SessionStart hook 在 CLI 启动时就触发，这样 hook 就能在用户开始交互之前
+  // 先做初始化（环境校验、上下文预热等）。
+  // 以前这段逻辑放在 `agentLoop` 的首次调用分支里，结果就是：
+  // 1. 如果一个会话只执行 slash 命令然后退出，没有任何用户消息，SessionStart 根本不会触发；
+  // 2. 就算触发了，也会落后于第一条 prompt。
+  // 现在它和 `gracefulShutdown` 里的 SessionEnd 是对称的。
+  // 同样采用 fire-and-forget，慢 hook 绝不能阻塞启动。
   if (options.hookBus?.has('SessionStart')) {
     options.hookBus
       .emit({ name: 'SessionStart', session: { cwd: process.cwd(), modelId } })
       .catch((err) => debugLog('agent.hook-session-start-error', String(err)))
   }
 
-  // Resume / continue. Three resume entry points:
-  //   1. `--continue` (-c): loads the most recent session synchronously
-  //      here, no picker. Quick muscle-memory continuation.
-  //   2. `--resume <id>`: looks up the session by id / slug / filename
-  //      prefix and loads it directly. The post-exit hint we print
-  //      ("Resume: xc --resume <id>") feeds back into this branch.
-  //   3. `--resume` (no value): defer to the in-Ink picker via
-  //      resumeIntent='pick', so the user can browse.
-  // --continue takes precedence if both are set, matching CC.
+  // Resume / continue。这里有三个入口：
+  //   1. `--continue` (-c)：同步加载最近一次会话，不走选择器，适合肌肉记忆式继续。
+  //   2. `--resume <id>`：按 id / slug / 文件名前缀查找会话并直接加载。
+  //      我们退出后打印的提示（`Resume: xc --resume <id>`）就是反向引导到这里。
+  //   3. `--resume`（不带值）：把选择权交给 Ink 内部 picker，通过 `resumeIntent='pick'`
+  //      让用户自己浏览。
+  // 如果 `--continue` 和 `--resume` 同时出现，优先使用 `--continue`，和 CC 保持一致。
   let initialSession: LoadedSession | null = null
   let resumeIntent: 'pick' | null = null
   if (argv.continue) {
@@ -439,12 +420,12 @@ async function main() {
     }
   }
 
-  // Combine prompt with stdin
+  // 把 stdin 内容和命令行 prompt 合并起来。
   const fullPrompt = [stdinContent, prompt].filter(Boolean).join('\n\n')
 
-  // Print mode: bypass Ink entirely. Mounting the TUI refs raw stdin, which
-  // keeps the Node event loop alive past the queued unmount — that's why -p
-  // used to hang until a keypress. See packages/cli/src/print.ts.
+  // Print 模式：完全绕过 Ink。只要挂载 TUI，就会让 raw stdin 把 Node 事件循环拖住，
+  // 直到 queued unmount 之后还不退出，这就是以前 `-p` 会卡到必须按键的原因。
+  // 细节见 `packages/cli/src/print.ts`。
   if (argv.print) {
     if (!fullPrompt) {
       console.error('Error: -p / --print requires a prompt (as an argument or via stdin).')
@@ -456,34 +437,33 @@ async function main() {
     process.exit(code)
   }
 
-  // Heads-up: WebSearch needs a key. Print once, before Ink takes over, so
-  // the hint lands in scrollback above the TUI. Not fatal — WebFetch still
-  // works key-less, and the tool itself returns a detailed error if invoked
-  // without a key configured.
+  // 提前提醒：WebSearch 需要 key。这里在 Ink 接管之前先打印一次，
+  // 这样提示会落在 TUI 上方的 scrollback 里。
+  // 这不是致命错误：WebFetch 仍然可以在没有 key 的情况下工作，
+  // 而且工具本身在缺少 key 时也会返回更详细的错误。
   if (!process.env.TAVILY_API_KEY && !process.env.BRAVE_API_KEY) {
     printNoWebSearchKeyHint()
   }
 
-  // Start the app — waitUntilExit resolves when Ink unmounts (including on Ctrl+C)
+  // 启动应用。`waitUntilExit` 会在 Ink 卸载时 resolve（包括 Ctrl+C 的情况）。
   const waitUntilExit = startApp(model, options, fullPrompt || undefined, {
     initialSession,
     resumeIntent,
   })
   await waitUntilExit()
 
-  // Normal exit path (including Ctrl+C which unmounts Ink first)
+  // 正常退出路径（包括 Ctrl+C，因为它会先让 Ink 卸载）。
   await gracefulShutdown(0)
 }
 
-/** Resolve a user-provided session lookup key into a session jsonl
- *  path. Accepts the same forms a user might paste from the post-exit
- *  hint we print:
- *    - bare sessionId (`20260101-120000-000`)
- *    - slug (`fix-login`)
- *    - full filename stem (`fix-login-20260101-120000-000`)
- *  Exact matches are preferred; if nothing exact matches, falls back
- *  to a prefix match against the sessionId (long enough to disambiguate).
- *  Returns the file path of the first match, newest first, or null. */
+/** 把用户提供的会话查找 key 解析成 session jsonl 文件路径。
+ *  支持的输入格式和我们退出后打印的提示一致：
+ *    - 纯 sessionId（`20260101-120000-000`）
+ *    - slug（`fix-login`）
+ *    - 完整文件名前缀（`fix-login-20260101-120000-000`）
+ *  优先精确匹配；如果没有精确命中，就退回到对 sessionId 的前缀匹配
+ *  （前缀长度足够区分时才会命中）。
+ *  返回 newest first 排序下第一条匹配项的文件路径，找不到则返回 null。 */
 async function findSessionFile(input: string): Promise<string | null> {
   const sessions = await listSessions()
   for (const s of sessions) {
@@ -499,7 +479,7 @@ async function findSessionFile(input: string): Promise<string | null> {
   return null
 }
 
-/** Load .env file from cwd (walk up to find it, like dotenv convention) */
+/** 从 cwd 开始向上查找并加载 `.env` 文件，行为和 dotenv 的常见约定一致。 */
 function loadEnvFile(): void {
   let dir = process.cwd()
   while (true) {
@@ -508,26 +488,25 @@ function loadEnvFile(): void {
       try {
         process.loadEnvFile(envPath)
       } catch {
-        // Ignore parse errors
+        // 解析失败就忽略，继续走后续启动流程。
       }
       return
     }
     const parent = path.dirname(dir)
-    if (parent === dir) break // reached root
+    if (parent === dir) break // 已经到根目录了。
     dir = parent
   }
 }
 
-/** Plain-terminal prompt used during startup, before Ink mounts.
- *  Currently the only caller is the MCP project-level trust dialog —
- *  loader.ts hands its `askUser` callback an arbitrary list of options
- *  and expects one of the option labels back.
+/** 在启动期间、Ink 还没挂载之前使用的纯终端提示。
+ *  目前唯一的调用方是 MCP 的项目级信任对话框：
+ *  `loader.ts` 会把一个可选项列表交给这里的 `askUser` 回调，
+ *  并期望我们返回其中一个选项标签。
  *
- *  Falls back gracefully when stdin isn't a TTY (piped input, CI,
- *  `--print` mode): we return the option whose label looks like
- *  "skip" if present, otherwise the second option (loader's convention
- *  is index 1 == safe default). This guarantees we never block waiting
- *  for input that will never arrive. */
+ *  当 stdin 不是 TTY（管道输入、CI、`--print` 模式）时会优雅降级：
+ *  如果存在看起来像 `skip` 的选项，就返回它；否则返回第二个选项
+ *  （loader 的约定是索引 1 对应安全默认项）。这样就能避免我们阻塞在
+ *  一个永远不会到来的输入上。 */
 async function askInTerminal(
   question: string,
   options: Array<{ label: string; description: string }>,
@@ -540,9 +519,9 @@ async function askInTerminal(
 
   const readline = await import('node:readline/promises')
 
-  // Render to stderr so the prompt body lands in the same stream as
-  // other CLI status messages; this keeps stdout clean if someone is
-  // capturing it (rare during interactive startup but better-safe).
+  // 把提示渲染到 stderr，这样提示正文会和其他 CLI 状态消息落在同一条流里；
+  // 如果有人正在捕获 stdout，这样还能保持 stdout 干净（交互启动时比较少见，
+  // 但这样更稳妥）。
   process.stderr.write('\n' + chalk.yellow(question) + '\n')
   for (let i = 0; i < options.length; i++) {
     const o = options[i]
@@ -582,7 +561,7 @@ function readStdin(): Promise<string> {
 
     process.stdin.on('data', onData)
     process.stdin.on('end', onEnd)
-    // Timeout for stdin — don't hang forever
+    // stdin 超时保护，避免永远挂住。
     const timer = setTimeout(() => {
       cleanup()
       resolve(data)
@@ -590,15 +569,14 @@ function readStdin(): Promise<string> {
   })
 }
 
-// ── Rejection safety net ────────────────────────────────────────────────
-// Node 15+ terminates the process on unhandled rejection by default. The
-// AI SDK creates several promises (response, usage, finishReason, toolCalls,
-// the stream's internal flush) that can reject independently when a request
-// fails — we try to drain them in loop.ts, but timing races or a new SDK
-// path can still leak one. Without this handler, a provider-side error
-// (insufficient balance, bad max_tokens, upstream 5xx) would kill the
-// REPL mid-session. We swallow the rejection and let the loop's onError
-// path render a friendly message instead.
+// ── 失败保护网 ────────────────────────────────────────────────────────
+// Node 15+ 默认会在未处理的 rejection 上直接终止进程。
+// AI SDK 会创建若干个彼此独立的 promise（response、usage、finishReason、
+// toolCalls、流内部 flush 等），请求失败时它们都可能单独 reject。
+// 我们虽然会在 `loop.ts` 里尽量把它们都收干净，但时序竞争或者 SDK 新路径
+// 仍然可能漏掉一个。如果没有这个处理器，provider 侧错误（余额不足、max_tokens
+// 配错、上游 5xx）就可能在会话中途直接把 REPL 砍掉。
+// 这里吞掉 rejection，让 loop 的 onError 路径去显示更友好的消息。
 process.on('unhandledRejection', (reason) => {
   if (process.env.DEBUG_STDOUT) {
     console.error('[unhandledRejection]', reason)
@@ -610,19 +588,18 @@ process.on('uncaughtException', (err) => {
   }
 })
 
-// ── SIGINT handler ──────────────────────────────────────────────────────
-// Only a safety net: sets exitCode=0 so if the process exits before
-// gracefulShutdown() runs, the exit code is still 0. On double Ctrl+C,
-// force-exits immediately.
+// ── SIGINT 处理器 ──────────────────────────────────────────────────────
+// 这里只是安全兜底：先把 exitCode 设成 0，这样即使进程在 `gracefulShutdown()`
+// 之前就退出，退出码也还是 0。双击 Ctrl+C 时则立即强制退出。
 let sigintCount = 0
 process.on('SIGINT', () => {
   sigintCount++
   process.exitCode = 0
   if (sigintCount >= 2) {
-    // Double Ctrl+C → user wants out NOW. Skip async cleanup (gracefulShutdown
-    // was already running from the first press) but ALWAYS restore the terminal
-    // so the shell prompt is usable. Without this reset, raw mode / hidden
-    // cursor / bracketed paste mode can leak into the shell.
+    // 双击 Ctrl+C → 用户就是要立刻退出。这里跳过异步清理（第一次按键时
+    // `gracefulShutdown` 很可能已经在跑了），但一定要恢复终端，不然 shell prompt
+    // 就可能不可用。没有这个重置，raw mode / 隐藏光标 / bracketed paste
+    // 可能会泄漏到 shell 里。
     resetTerminal()
     printResumeHint()
     process.exit(0)
@@ -630,8 +607,8 @@ process.on('SIGINT', () => {
 })
 
 main().catch((err) => {
-  // If we're shutting down (Ctrl+C unmounted Ink, waitUntilExit rejected),
-  // don't treat it as a fatal error — gracefulShutdown handles it.
+  // 如果当前正在关机（Ctrl+C 已经让 Ink 卸载，`waitUntilExit` 也因此 reject），
+  // 不要把它当成致命错误处理，`gracefulShutdown` 已经负责收尾了。
   if (sigintCount > 0 || shutdownInProgress) {
     return
   }

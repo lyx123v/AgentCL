@@ -1,24 +1,21 @@
-// @x-code-cli/cli — Workspace file index for @-mention completion.
+// @x-code-cli/cli - 用于 @-mention 补全的工作区文件索引。
 //
-// On mount we BFS-walk cwd and produce a flat list of {relPath, isDirectory}
-// entries that the menu's fuzzy ranker consumes. Three filtering layers in
-// descending order of authority:
+// 挂载时我们会对 cwd 做一次 BFS 扫描，生成一份扁平的
+// `{relPath, isDirectory}` 列表，供菜单里的 fuzzy ranker 使用。
+// 过滤分三层，按优先级从高到低：
 //
-//   1. Hard blacklist (node_modules, .git, dist, .next, .x-code, out,
-//      build, coverage). Matches what every project ignores in practice and
-//      keeps us from blowing the entry budget on vendor trees before
-//      .gitignore parsing even runs.
-//   2. Simple .gitignore (top-level file only — bare names and `*.suffix`
-//      patterns; everything else is silently skipped). MVP-grade; we don't
-//      take an `ignore` npm dependency for a UI nicety. Complex repos that
-//      need full git semantics can fall back to the hard blacklist.
-//   3. Symlink skip — prevents loops without needing a visited-set.
+//   1. 强黑名单（node_modules、.git、dist、.next、.x-code、out、
+//      build、coverage）。这基本覆盖了大家实际都会忽略的目录，
+//      也能在 `.gitignore` 解析前就避免把 vendor 树塞爆条目预算。
+//   2. 简化版 .gitignore（只看顶层文件 - bare names 和 `*.suffix` 模式；
+//      其他语法一律静默跳过）。这是 MVP 级方案；为了一个 UI 便利功能，
+//      我们不引入 `ignore` 这个 npm 依赖。复杂仓库如果真的需要完整 git 语义，
+//      也还有强黑名单兜底。
+//   3. 跳过 symlink - 不需要 visited-set 也能防止循环。
 //
-// Bounded by a 5000-entry / 200ms soft cap so a giant monorepo doesn't
-// freeze the UI on startup. Hitting the cap returns whatever was scanned
-// so far; the user sees suggestions for the BFS-frontier portion of the
-// tree, which is by definition the shallow part — closer to what they
-// actually want to type.
+// 再加上 5000 条 / 200ms 的软上限，这样超大的 monorepo 也不会在启动时把 UI 卡死。
+// 一旦触顶，就只返回已经扫描到的内容；用户看到的是 BFS 前沿那一部分的建议，
+// 也就是树里更浅、通常也更接近他们真正想输入的部分。
 import fs from 'node:fs/promises'
 import path from 'node:path'
 
@@ -43,25 +40,24 @@ const DEFAULT_MAX_ENTRIES = 5000
 const DEFAULT_MAX_MS = 200
 
 interface SimpleIgnore {
-  /** Bare names that match anywhere in the tree (`node_modules`, `dist`). */
+  /** 会在树中任何位置匹配的裸名字（`node_modules`、`dist`）。 */
   names: Set<string>
-  /** Lower-cased suffixes including the dot (`.log`, `.tsbuildinfo`). */
+  /** 带点、且已经小写化的后缀（`.log`、`.tsbuildinfo`）。 */
   suffixes: Set<string>
 }
 
 const EMPTY_IGNORE: SimpleIgnore = { names: new Set(), suffixes: new Set() }
 
-/** Parse a .gitignore content string with deliberately reduced semantics:
- *  - skip blank lines, comments (`#`), negations (`!…`)
- *  - `*.ext`               → suffix `.ext`
- *  - `name` / `/name` / `name/`  → bare name (matches at any depth)
- *  - anything containing `/` mid-pattern, `**`, or `?` / `[` is dropped
+/** 以刻意简化的语义解析 .gitignore 内容：
+ *  - 跳过空行、注释（`#`）、否定项（`!…`）
+ *  - `*.ext`               -> 后缀 `.ext`
+ *  - `name` / `/name` / `name/`  -> 裸名字（任意深度匹配）
+ *  - 任何中间带 `/`、`**`、或者 `?` / `[` 的模式都丢弃
  *
- *  This catches the 90%+ case that hard-blacklist misses (`*.log`,
- *  `coverage`, `.DS_Store`, `*.tsbuildinfo`) without pulling in the
- *  `ignore` package. Repos with intricate ignore rules just won't
- *  benefit fully from gitignore filtering — the hard blacklist still
- *  protects them from the worst offenders. */
+ *  这能覆盖强黑名单漏掉的 90%+ 常见情况（`*.log`、`coverage`、
+ *  `.DS_Store`、`*.tsbuildinfo`），而不用引入 `ignore` 包。
+ *  对于忽略规则特别复杂的仓库，它们就只能部分受益于 gitignore 过滤；
+ *  但强黑名单仍然会把最糟糕的那些目录挡住。 */
 export function parseSimpleGitignore(content: string): SimpleIgnore {
   const names = new Set<string>()
   const suffixes = new Set<string>()
@@ -94,15 +90,14 @@ export interface ScanOptions {
   signal?: AbortSignal
   maxEntries?: number
   maxMs?: number
-  /** Override gitignore. Test injection point — production path always
-   *  loads `<rootDir>/.gitignore`. */
+  /** 覆盖 gitignore。测试注入点 - 生产路径总是加载 `<rootDir>/.gitignore`。 */
   ignore?: SimpleIgnore
 }
 
-/** BFS over rootDir with the three filtering layers. POSIX-style relPaths
- *  even on Windows so they match what the menu displays and what the user
- *  is typing (forward-slash). file-ingest.ts:118 normalizes either flavor
- *  on the backend. */
+/** 对 rootDir 做 BFS，并应用上面的三层过滤。
+ *  即便在 Windows 上也输出 POSIX 风格的 relPath，这样它们和菜单显示、
+ *  以及用户输入的前向斜杠形式都一致。
+ *  file-ingest.ts:118 会在后端把两种风格都规范化。 */
 export async function scanWorkspaceFiles(opts: ScanOptions): Promise<FileEntry[]> {
   const { rootDir, signal, maxEntries = DEFAULT_MAX_ENTRIES, maxMs = DEFAULT_MAX_MS } = opts
   const ignore = opts.ignore ?? (await loadIgnore(rootDir))
@@ -160,9 +155,9 @@ export interface UseFileCompletionResult {
   loading: boolean
 }
 
-/** React hook: scan once on mount, expose entries + loading flag. cwd is
- *  read from `process.cwd()` at scan time and never re-checked — shell
- *  tools that internally chdir don't affect the menu. */
+/** React hook：挂载时扫描一次，暴露 entries + loading 标志。
+ *  cwd 会在扫描时从 `process.cwd()` 读取，之后不再重新检查——
+ *  shell 工具内部如果 chdir，也不会影响这个菜单。 */
 export function useFileCompletion(): UseFileCompletionResult {
   const [entries, setEntries] = useState<readonly FileEntry[]>([])
   const [loading, setLoading] = useState(true)

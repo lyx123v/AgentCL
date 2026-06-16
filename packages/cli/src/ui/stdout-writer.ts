@@ -1,24 +1,23 @@
-// @x-code-cli/cli — Direct-to-stdout message writer.
+// @x-code-cli/cli - 直接写 stdout 的消息渲染器。
 //
-// Why this exists: Ink's layout engine miscalculates visual widths for wide
-// (CJK) characters, so when the Ink renderer repaints a region it can rewind
-// by the wrong number of rows and overlap previous content. This shows up as
-// "spliced bullets" and scrambled tool-result text on long Chinese responses.
+// 之所以需要这个文件，是因为 Ink 的布局引擎对宽字符（CJK）视觉宽度
+// 计算不准，所以当 Ink 重绘某个区域时，可能会按错误的行数往回退，
+// 结果把前面的内容盖住。表现出来就是长中文回复里会出现“bullets 被
+// 切开”或者工具结果文本被打散的问题。
 //
-// Claude Code avoids the same class of bug by vendoring a custom Ink fork
-// with a grapheme-aware stringWidth + soft-wrap metadata. We take a simpler
-// route: render message history OUTSIDE of Ink entirely by writing raw ANSI
-// to stdout via the `write` function returned from Ink's `useStdout()` hook.
-// That function is documented as "similar to <Static>, except … it only
-// works with strings" — it goes through Ink's internal writeToStdout which
-// properly coordinates with log-update (clear dynamic region → write →
-// re-render). We avoid `console.log` + `patchConsole` because the patch
-// library's internal string handling has been observed to drop content on
-// very large multi-line writes.
+// Claude Code 通过内置一份定制版 Ink，并补上 grapheme-aware 的
+// stringWidth 和 soft-wrap 元数据来规避同类问题。我们采用更简单的
+// 路线：把消息历史完全放在 Ink 之外渲染，直接通过 Ink 的
+// `useStdout()` hook 返回的 `write` 方法往 stdout 写原始 ANSI。
+// 这个方法在文档里被描述成“类似 <Static>，只是……它只能处理字符串”。
+// 它会走 Ink 内部的 writeToStdout，从而和 log-update 正确协作
+// （先清空动态区域 -> 写入 -> 再重绘）。我们没有选 `console.log` +
+// `patchConsole`，因为后者在超大的多行写入场景里，内部字符串处理
+// 曾经被观察到会丢内容。
 //
-// Ink still owns the bottom-of-screen dynamic region (spinner, in-progress
-// tool call, permission dialog, chat input). That region is short and
-// mostly ASCII, so Ink's own measurement is good enough.
+// Ink 仍然负责屏幕底部那块动态区域（spinner、进行中的 tool call、
+// 权限弹窗、chat input）。那一块内容很短，而且大多是 ASCII，所以
+// Ink 自己的宽度测量已经足够。
 import { Chalk } from 'chalk'
 
 import { debugLog } from '@x-code-cli/core'
@@ -41,13 +40,13 @@ import {
 
 const c = new Chalk({ level: 3 })
 
-/** Function that writes to stdout through Ink's log-update coordination. */
+/** 通过 Ink 的 log-update 协调机制写 stdout 的函数。 */
 export type InkWrite = (data: string) => void
 
 /**
- * Truncate `s` so it fits visually in `maxLen` printable cells. We use a
- * UTF ellipsis (…) as the truncation marker — single cell, looks
- * tighter than three dots, matches CC's truncated previews.
+ * 截断 `s`，让它在视觉上塞进 `maxLen` 个可打印 cell。
+ * 这里用 UTF 省略号（…）作为截断标记 - 它只占 1 个 cell，
+ * 比三个点更紧凑，也和 CC 的预览截断风格一致。
  */
 function truncatePreview(s: string, maxLen: number): string {
   if (maxLen < 4 || s.length <= maxLen) return s
@@ -57,12 +56,11 @@ function truncatePreview(s: string, maxLen: number): string {
 function formatToolCall(tc: DisplayToolCall): string {
   const label = getToolLabel(tc.toolName)
   const rawPreview = getToolInputPreview(tc.toolName, tc.input)
-  // Cap the preview so long Bash commands / file paths don't wrap into a
-  // ragged multi-line block in scrollback. Compute the budget against the
-  // terminal width so wide terminals get more room. The line1 prefix is
-  // ` ● <label>(` and we close with `)`, so reserve label.length + 5 cells
-  // for decoration; leave a small safety margin for the trailing
-  // `\x1b[K` / cursor positioning the terminal may add.
+  // 给预览加上上限，避免很长的 Bash 命令 / 文件路径在 scrollback 里
+  // 换成参差不齐的多行块。这里按终端宽度来算预算，所以宽终端能拿
+  // 到更多空间。line1 前缀是 ` ● <label>(`，结尾还要补 `)`，所以要
+  // 为这些装饰预留 label.length + 5 个 cell；另外再留一点安全余量，
+  // 给终端可能额外加上的 `\x1b[K` / 光标定位字符腾地方。
   const cols = Math.max(40, process.stdout.columns ?? 120)
   const decoration = label.length + 5
   const safetyMargin = 4
@@ -78,11 +76,10 @@ function formatToolCall(tc: DisplayToolCall): string {
   const previewSuffix = inputPreview ? c.hex(BLUE_PURPLE)(`(${inputPreview})`) : ''
   const line1 = ` ${c.hex(dotColor)(GLYPH_BULLET)} ${c.bold(label)}${previewSuffix}`
 
-  // Edit / writeFile success path: render the structured diff under the
-  // bullet INSTEAD of the plain "Wrote N lines" / "Applied changes" summary.
-  // We only take this branch when the tool actually succeeded — failed
-  // edits keep the regular markdown summary so the red error message lands
-  // where the user expects to read it.
+  // edit / writeFile 成功路径：在 bullet 下面渲染结构化 diff，取代那种
+  // 纯文本的 "Wrote N lines" / "Applied changes" 汇总。
+  // 只有工具真的成功时才走这里；如果编辑失败，就保留普通的 markdown
+  // 汇总，这样红色错误信息会落在用户预期的位置。
   if (tc.editPayload && !isFailure) {
     const cols = Math.max(40, process.stdout.columns ?? 120)
     const diffLines = renderEditDiff(tc.editPayload, cols)
@@ -96,130 +93,121 @@ function formatToolCall(tc: DisplayToolCall): string {
 
   if (!resultSummary) return line1
 
-  // Render the result through the markdown pipeline so tool outputs with
-  // headings / lists / inline code / etc. display styled instead of as
-  // raw `### ...` / `**...**` characters. Denied AND errored results
-  // render as plain red text so failures stand out in scrollback —
-  // matches Claude Code's behavior of coloring the stderr/exit-code
-  // block in red for non-zero shell exits.
+  // 通过 markdown pipeline 渲染结果，这样带标题 / 列表 / 行内代码等
+  // 的 tool 输出就会以样式化方式显示，而不是原样露出 `### ...` /
+  // `**...**` 这些字符。被拒绝或出错的结果会以纯红文本显示，让失败
+  // 在 scrollback 里更醒目 - 这和 Claude Code 对非零 shell 退出时
+  // 把 stderr / exit-code block 染红的行为一致。
   const rendered = isFailure ? resultSummary : renderMarkdown(resultSummary).replace(/\n+$/, '')
 
-  // Strip blank lines — markdown rendering inserts paragraph spacing
-  // between blocks, which makes the tool-result summary look sparse
-  // (heading, blank, URL, blank, "... +7 lines"). We want a tight
-  // 2-3 line summary, not a paragraphed body.
+  // 去掉空行 - markdown 渲染会在块与块之间插入段落间距，这会让
+  // tool result summary 看起来很散（标题、空行、URL、空行、"... +7 lines"）。
+  // 这里我们想要的是紧凑的 2-3 行摘要，而不是段落化正文。
   const lines = normalizeLineEndings(rendered)
     .split('\n')
     .filter((l) => l.trim().length > 0)
   const durSuffix = durationStr ? c.gray(` (${durationStr})`) : ''
-  // Errored lines get the ERROR hex color applied AFTER line splitting —
-  // applying it before splitting would split on ANSI-reset sequences
-  // embedded mid-style and leave half the body uncolored. Apply per line.
+  // 出错行要在拆分成行之后再统一套 ERROR 颜色。
+  // 如果提前染色再 split，ANSI reset 序列会把中间样式拆开，导致
+  // 一半内容没上色。按行上色更稳妥。
   const paint = isFailure ? (s: string) => c.hex(ERROR)(s) : (s: string) => s
   const head = `   ${c.gray(GLYPH_RESULT_BRACKET)}  ${paint(lines[0] ?? '')}`
   const tail = lines.slice(1).map((l) => `${RESULT_INDENT}${paint(l)}`)
-  // Duration goes on the last visible line of the body so it reads like
-  // "... +13 lines (1.2s)" on truncated summaries.
+  // 耗时信息放在正文最后一行，这样在被截断的摘要里看起来就是
+  // `... +13 lines (1.2s)` 这种形式。
   const combined = tail.length > 0 ? [head, ...tail] : [head]
   combined[combined.length - 1] = combined[combined.length - 1] + durSuffix
   return `${line1}\n${combined.join('\n')}`
 }
 
-/** Replace every LF with CRLF. Defensive against terminals where stdout's
- *  ONLCR output translation is disabled (Ink puts stdin into raw mode but
- *  stdout's termios settings can be implementation-dependent, and VS Code
- *  terminal in particular has been observed to not translate bare LF into
- *  CRLF). Without an explicit `\r`, the cursor stays at whatever column
- *  the line ended on, and the following cell-buffer repaint positions at
- *  col 1 via `\x1b[1G` — overwriting only the first few columns and
- *  leaving the tail of the just-written text visible "to the right of"
- *  the next row's content (looks like partial text next to Thinking). */
+/** 把所有 LF 替换成 CRLF。
+ *  这是为了防御某些终端里 stdout 的 ONLCR 输出转换被禁用的情况
+ *  （Ink 会把 stdin 设成 raw mode，但 stdout 的 termios 配置会因
+ *  实现不同而不同；尤其是 VS Code terminal，已经观察到它不会把
+ *  纯 LF 翻译成 CRLF）。如果不显式加 `\r`，光标就会停留在线尾，
+ *  而后续的 cell-buffer 重绘又会通过 `\x1b[1G` 把列定位到 1，
+ *  结果只覆盖前几列，刚写进去的文本尾巴还会“挂”在下一行内容右边，
+ *  看起来就像 Thinking 旁边残留了一截半截文本。 */
 function toCRLF(s: string): string {
   return s.replace(/\r?\n/g, '\r\n')
 }
 
 /**
- * Has the previous scrollback write left a fully blank row below its last
- * line of content? Used to keep the spacing between adjacent entities at
- * exactly one blank row regardless of which entity wrote first.
+ * 上一次 scrollback 写入后，最后一行下面是不是已经留出了完整空行？
+ * 这个标记用来保证相邻实体之间永远只隔 1 个空白行，不管谁先写都一样。
  *
- * Why we need this flag: streaming text chunks each end with a single
- * `\n` (cursor on the next row, no trailing blank) so a tool call that
- * commits right after a stream would butt against the text. User
- * messages and finalized tool/text writes already leave a trailing
- * blank, so back-to-back blocks don't need any extra spacer. The flag
- * lets the next entity decide: if the previous write didn't already
- * draw a blank below itself, prepend one; otherwise don't.
+ * 为什么需要这个标记：流式文本 chunk 每次结尾都只有一个 `\n`
+ * （光标到下一行，但并没有额外空白行），所以如果某个 tool call 刚好
+ * 在流式输出结束后提交，它就会紧贴着文本。用户消息和最终完成的
+ * tool / text 写入本来就会留一个尾随空白，所以它们之间不需要再额外
+ * 插空行。这个标记让下一个实体可以自己判断：如果前一次写入没有先
+ * 画出空白行，那就补一个；否则就别补。
  *
- * Initialized to `true` so the very first write of a session doesn't
- * draw a leading blank row at the top of the terminal.
+ * 这里初始化为 `true`，这样一个会话里的第一次写入不会在终端顶部
+ * 先画出一个前导空白行。
  */
 let prevWriteEndedWithBlankRow = true
 
 /**
- * Was the previous write a streaming text chunk? When the next write is
- * ALSO a streaming chunk we treat it as a continuation of the same
- * assistant message and do NOT prepend the leading-blank that the
- * `prevWriteEndedWithBlankRow` machinery would otherwise add. Each
- * streaming chunk ends with a single `\n` (no trailing blank), so without
- * this guard the blank gets injected at every chunk boundary — and since
- * the stream buffer flushes on cadence rather than markdown structure,
- * those boundaries fall between adjacent list items / paragraph lines
- * and produce visible inter-line gaps where the model emitted none.
+ * 上一次写入是不是 streaming text chunk？
+ * 如果下一次写入也是 streaming chunk，我们会把它视为同一条 assistant
+ * 消息的续写，并且不再补 `prevWriteEndedWithBlankRow` 机制原本会加的
+ * 那个前导空白行。每个 streaming chunk 都只以一个 `\n` 结尾
+ * （没有尾随空白行），所以如果没有这个保护，空白行会在每个 chunk
+ * 边界都被插进去；而流式缓冲是按节奏 flush 的，不是按 Markdown 结构
+ * flush 的，于是这些边界会落在相邻列表项 / 段落行之间，形成模型
+ * 本来没写出来的可见空隙。
  */
 let prevWriteWasStreamingChunk = false
 
-/** Reset the spacing flag — call when the scrollback is cleared (e.g.
- *  /clear) so the next write doesn't think there's still a blank above.
- *  Also drops any buffered read-group entries: post-/clear they refer to
- *  pre-clear messages that are no longer in scrollback, so committing
- *  their summary would leave a phantom row above the now-empty history. */
+/** 重置间距标记 - 在 scrollback 被清空时调用（比如 /clear），这样
+ *  下一次写入就不会误以为上方还留着空白行。
+ *  同时也要清掉任何缓冲中的 read-group：/clear 之后这些条目都指向
+ *  已经不在 scrollback 里的旧消息了，如果还提交它们的汇总，就会在
+ *  现在空空的历史上方留下一个幽灵行。 */
 export function resetScrollbackSpacing(): void {
   prevWriteEndedWithBlankRow = true
   prevWriteWasStreamingChunk = false
   pendingReadGroup = []
 }
 
-/** Did the most recent scrollback write leave a fully blank row below its
- *  last line of content? Read by ChatInput's frame builder so the live
- *  tool/spinner block can apply the SAME leading-blank rule that the
- *  committed-tool path uses — without it, the live frame draws flush
- *  against streaming text and the blank "appears" only when the tool
- *  finishes (a visible spacing jump). */
+/** 最近一次 scrollback 写入后，最后一行下面有没有已经空出完整空行？
+ *  ChatInput 的 frame builder 会读这个值，这样 live 的 tool / spinner
+ *  块就能和已提交 tool 的路径使用同一套前导空白规则 - 否则 live
+ *  frame 会直接贴着 streaming text 画，等工具真正结束时空白才突然
+ *  “冒出来”，视觉上就会有一个明显的跳变。 */
 export function lastWriteEndedWithBlankRow(): boolean {
   return prevWriteEndedWithBlankRow
 }
 
-/** Pending buffer of consecutive completed read-only tool calls. Holds
- *  Read / Glob / Grep / ListDir (`isCollapsibleReadOnlyTool`) rows that
- *  arrived back-to-back so we can fold them into a single
- *  `● Read 3 files (foo.ts, bar.ts, baz.ts)` summary line.
+/** 连续完成的只读 tool call 的待处理缓冲区。
+ *  它会收集连续到达的 Read / Glob / Grep / ListDir
+ *  （`isCollapsibleReadOnlyTool`）行，然后把它们折叠成一条
+ *  `● Read 3 files (foo.ts, bar.ts, baz.ts)` 这样的汇总行。
  *
- *  Why a module-level buffer rather than a render-time transform:
- *  scrollback is append-only terminal history — once a row is written
- *  via `process.stdout.write` it can't be rewritten. Claude Code does
- *  this transform purely at render time because Ink owns its entire
- *  transcript and re-renders on every state change; we don't have that
- *  affordance, so the only way to "merge" is to delay committing the
- *  individual rows until we know whether more will follow.
+ *  为什么要用模块级缓冲，而不是在渲染时顺手做转换：
+ *  scrollback 是只增不改的终端历史 - 一旦某行通过 `process.stdout.write`
+ *  写出去了，就不能回头修改。Claude Code 能把这件事放在渲染时处理，
+ *  是因为 Ink 拥有整段 transcript，并且会在状态变化时整段重渲染；
+ *  我们没有这种能力，所以要想“合并”这些行，只能先延迟提交，
+ *  等确认后面还会不会再来更多行。
  *
- *  Flush is triggered when (a) any non-collapsible message hits
- *  `writeMessageToStdout` (assistant text, write tool, user message —
- *  these break the chain) or (b) `flushPendingReadGroup` is called
- *  externally, e.g. ChatInput's commit pass at end-of-turn.
+ *  触发 flush 的时机有两个：
+ *  (a) 任何不可折叠的消息进入 `writeMessageToStdout`
+ *      （assistant 文本、write tool、user message，都会打断链条）
+ *  (b) 外部显式调用 `flushPendingReadGroup`
+ *      ，例如 ChatInput 在 turn 结束时的 commit 流程。
  *
- *  Consequence the user can perceive: a single isolated read tool
- *  doesn't appear in scrollback until the assistant emits its closing
- *  text (or the turn ends). The live tool indicator covers the gap
- *  while the chain runs, so the delay is invisible during normal flow.
- *  Tradeoff is acceptable for the win on multi-read chains, which are
- *  the noisy case that motivated this. */
+ *  用户能直接感知到的后果是：单独一个 read tool 不会立刻出现在
+ *  scrollback 里，要等 assistant 发出收尾文本（或者 turn 结束）后才
+ *  会落盘。好处是 live tool indicator 会在这段时间内盖住空白，所以
+ *  正常流程下这个延迟是看不出来的。这个取舍能换来多 read 链条的
+ *  更清爽显示，代价是可以接受的。 */
 let pendingReadGroup: DisplayToolCall[] = []
 
-/** True when `msg` is a single-message bundle of completed, non-edit,
- *  read-only tool calls and nothing else (no assistant text, no command
- *  kind). Such messages are buffer-eligible — anything else flushes the
- *  buffer first and renders normally. */
+/** 当 `msg` 是一个只包含已完成、非编辑、只读 tool call 的单消息包时
+ *  返回 true（没有 assistant 文本，也没有 command kind）。
+ *  这类消息可以进入缓冲；其他任何消息都会先把缓冲刷掉，再正常渲染。 */
 function isCollapsibleMessage(msg: DisplayMessage): boolean {
   if (msg.role !== 'assistant') return false
   if (msg.content) return false
@@ -230,10 +218,10 @@ function isCollapsibleMessage(msg: DisplayMessage): boolean {
   )
 }
 
-/** Render one tool row (single-tool flush path) — same shape as
- *  `formatToolCall` produces inside `writeMessageToStdout`'s tool loop.
- *  Extracted so flush can reuse it without re-deriving the prepend-blank
- *  rule. */
+/** 渲染一条 tool row（单 tool flush 路径）。
+ *  结构和 `writeMessageToStdout` 的 tool 循环里 `formatToolCall` 产出的
+ *  结果一致。把它抽出来，是为了让 flush 逻辑能复用，而不用重新推导
+ *  前导空白行规则。 */
 function writeToolRow(write: InkWrite, tc: DisplayToolCall): void {
   const lead = prevWriteEndedWithBlankRow ? '' : '\n'
   write(toCRLF(lead + normalizeLineEndings(formatToolCall(tc)) + '\n'))
@@ -241,12 +229,12 @@ function writeToolRow(write: InkWrite, tc: DisplayToolCall): void {
   prevWriteWasStreamingChunk = false
 }
 
-/** Render the collapsed-group summary line, e.g.
+/** 渲染折叠后的分组汇总行，例如：
  *    ` ● Read 3 files (foo.ts, bar.ts, baz.ts)`
- *  Format mirrors a regular tool row so the visual rhythm is preserved:
- *  green bullet (all members are completed), bold label, BLUE_PURPLE
- *  paren'd detail. No `⎿` result body — the whole point of collapsing
- *  is to drop the per-call result rows. */
+ *  这个格式会尽量保持普通 tool row 的视觉节奏：绿色 bullet
+ *  （表示所有成员都已完成）、加粗标签、BLUE_PURPLE 的括号细节。
+ *  这里不再输出 `⎿` 的 result 正文 - 因为折叠的目的就是把每个调用
+ *  的单独结果行去掉。 */
 function writeCollapsedGroup(write: InkWrite, tools: readonly DisplayToolCall[]): void {
   const { label, detail } = formatReadGroupSummary(tools)
   const detailSuffix = detail ? c.hex(BLUE_PURPLE)(`(${detail})`) : ''
@@ -257,16 +245,15 @@ function writeCollapsedGroup(write: InkWrite, tools: readonly DisplayToolCall[])
   prevWriteWasStreamingChunk = false
 }
 
-/** Commit any buffered consecutive read-only tool calls to scrollback.
- *  Single tool → renders as a normal tool row (with its result body, so
- *  isolated reads don't lose their result blurb). Two or more → folds
- *  into one summary line. Idempotent — safe to call when buffer empty.
+/** 把缓冲中的连续只读 tool call 提交到 scrollback。
+ *  单个 tool 时，会按普通 tool row 渲染（带 result 正文，这样单独的
+ *  read 不会丢掉它自己的结果说明）。两个及以上时，则会折叠成一条
+ *  汇总行。这个函数是幂等的 - 缓冲为空时调用也没问题。
  *
- *  Called automatically at the top of `writeMessageToStdout` for every
- *  non-collapsible message, and externally by ChatInput's commit pass
- *  when `isLoading` is false (so a chain that ends without a closing
- *  text message — e.g. user abort — still gets its summary committed
- *  rather than left dangling in the buffer). */
+ *  它会在 `writeMessageToStdout` 处理每个不可折叠消息之前自动调用，
+ *  也会在 ChatInput 的 commit pass 里、当 `isLoading` 为 false 时
+ *  被外部调用。这样一条没有收尾文本就结束的链条（比如用户中断）
+ *  也能把汇总真正写进 scrollback，而不是一直悬在缓冲里。 */
 export function flushPendingReadGroup(write: InkWrite): void {
   if (pendingReadGroup.length === 0) return
   const buffered = pendingReadGroup
@@ -278,15 +265,14 @@ export function flushPendingReadGroup(write: InkWrite): void {
   }
 }
 
-/** Print a DisplayMessage to stdout. */
+/** 把一条 DisplayMessage 打印到 stdout。 */
 export function writeMessageToStdout(write: InkWrite, msg: DisplayMessage): void {
-  // Read-group buffering: a message that bundles only completed,
-  // non-edit, read-only tool calls is held in `pendingReadGroup` until
-  // the next non-collapsible message arrives or `flushPendingReadGroup`
-  // is called externally. The flush at the top of every other branch
-  // commits any accumulated reads BEFORE the current message renders,
-  // so chain summaries land in correct scrollback order
-  // (` ● Read 3 files` above ` …final assistant text`).
+  // read-group 缓冲：如果一条消息只包含已完成、非编辑、只读的 tool
+  // call，它会先进 `pendingReadGroup`，直到下一个不可折叠消息到来，
+  // 或者外部显式调用 `flushPendingReadGroup`。
+  // 在其它分支最前面先 flush，可以保证当前消息渲染之前，积累下来的
+  // read 都已经写出去了，这样链式摘要就会按正确的 scrollback 顺序
+  // 排列（` ● Read 3 files` 会出现在 ` …final assistant text` 上面）。
   if (isCollapsibleMessage(msg)) {
     for (const tc of msg.toolCalls!) pendingReadGroup.push(tc)
     return
@@ -297,28 +283,27 @@ export function writeMessageToStdout(write: InkWrite, msg: DisplayMessage): void
     const content = normalizeLineEndings(msg.content)
     debugLog('stdout.user', content)
     writeUserMessage(write, content, msg.kind === 'command-echo')
-    // writeUserMessage always emits a trailing `\n\n` (or `\n` for the
-    // compact slash-echo) — in both cases the next entity will sit on a
-    // fresh row with the preceding blank already in place.
+    // writeUserMessage 总会输出一个尾随 `\n\n`
+    // （compact slash-echo 时则是 `\n`） - 不管哪种情况，下一条
+    // 内容都会落在一个已经预留好前导空白的全新行上。
     prevWriteEndedWithBlankRow = msg.kind !== 'command-echo'
     prevWriteWasStreamingChunk = false
     return
   }
 
-  // Compact slash-command result — render as a tight `  ⎿  text` line so the
-  // pair `> /cmd` + result shows up as the Claude-style 2-line block instead
-  // of command + blank + indented body + blank.
+  // 紧凑的 slash-command 结果 - 渲染成一条收紧的 `  ⎿  text` 行，这样
+  // `> /cmd` + result 会显示成 Claude 风格的 2 行块，而不是 command +
+  // 空行 + 缩进正文 + 空行。
   //
-  // Body lines go through `renderInlineMarkdown` so `**name**` / `` `code` `` /
-  // `_italic_` markers our slash-command handlers emit display styled rather
-  // than as raw `**` / backtick characters. We deliberately do NOT wrap the
-  // body in `c.gray(...)` even though that's the conventional "secondary
-  // info" tint: the gray base dims everything inside it (incl. bold and
-  // truecolor inline-code), so the markdown rendering visually disappears
-  // — bold gray-on-gray reads as just gray, and the blue-purple inline-code
-  // color loses its contrast against a gray surround. The `⎿` glyph stays
-  // gray as the structural marker; body content uses the terminal default
-  // foreground so bold + inline-code stand out against it.
+  // 正文会走 `renderInlineMarkdown`，这样我们在 slash-command handler
+  // 里发出的 `**name**` / `` `code` `` / `_italic_` 标记就能真正显示成
+  // 样式，而不是直接露出原始的 `**` / backtick 字符。这里我们刻意不把
+  // 正文包进 `c.gray(...)`，虽然灰色常被当成“次要信息”的统一色调，
+  // 但它会把内部所有内容一起压暗（包括 bold 和真彩 inline-code），
+  // 结果 markdown 的样式几乎看不出来 - bold 变成“灰色的灰色”，
+  // inline-code 的蓝紫色也会和灰底失去对比。`⎿` glyph 仍然保留为灰色
+  // 结构标记；正文则使用终端默认前景色，让 bold 和 inline-code 自己
+  // 跳出来。
   if (msg.kind === 'command-result' && msg.content) {
     const content = normalizeLineEndings(msg.content)
     debugLog('stdout.command-result', content)
@@ -352,62 +337,56 @@ export function writeMessageToStdout(write: InkWrite, msg: DisplayMessage): void
   if (msg.content) {
     const content = normalizeLineEndings(msg.content)
     debugLog(msg.streamingChunk ? 'stdout.assistant-chunk' : 'stdout.assistant-full', content)
-    // Skip the leading-blank when this chunk is continuing a previous
-    // streaming chunk from the same assistant message — the prior chunk
-    // already left the cursor on the next row via its trailing `\n`,
-    // and prepending another `\n` would render as a visible blank
-    // between adjacent list items / paragraph lines whose only
-    // separator in the model's source was a single newline. The blank
-    // is still added on text→text transitions across non-streaming
-    // entities (tool result → final text) so nothing butts together.
+    // 当这个 chunk 只是同一条 assistant 消息里前一个 streaming chunk
+    // 的续写时，不要再补前导空白 - 前一个 chunk 已经靠尾部的 `\n`
+    // 把光标推进到下一行了。再补一个 `\n` 会在相邻列表项 / 段落行之间
+    // 画出一个看得见的空白，而模型原文里其实只有一个普通换行。
+    // 不过在非 streaming 的实体之间（比如 tool result → final text）
+    // 仍然会正常补空白，避免内容贴在一起。
     const isStreamContinuation = !!msg.streamingChunk && prevWriteWasStreamingChunk
     if (!prevWriteEndedWithBlankRow && !isStreamContinuation) {
       write(toCRLF('\n'))
       prevWriteEndedWithBlankRow = true
     }
 
-    // Special-case pure-whitespace streaming chunks (e.g. a bare "\n"
-    // = paragraph break marker between two lines of prose). Markdown
-    // rendering collapses these to an empty string, which would drop
-    // the visual paragraph break — so pass the whitespace through
-    // directly instead.
+    // 对纯空白的 streaming chunk 做特判（比如单独一个 `"\n"`，
+    // 它表示两段 prose 之间的段落断点）。Markdown 渲染会把它折叠成
+    // 空字符串，这样视觉上的段落断开就会丢失，所以这里直接把空白
+    // 原样传过去。
     if (msg.streamingChunk && content.trim() === '') {
-      // A bare paragraph-break token. It already encodes a blank line
-      // (whitespace-only `\n` or `\n\n`); after writing it the cursor
-      // sits below a blank row, so the next entity doesn't need to
-      // prepend another one.
+      // 这是一个纯段落断点 token。它本身已经编码了一个空行
+      // （只包含空白的 `\n` 或 `\n\n`）；写完之后光标会落在空白行
+      // 下面，所以下一条实体就不需要再额外前置空行了。
       write(toCRLF(content))
       prevWriteEndedWithBlankRow = content.endsWith('\n\n') || content.endsWith('\n')
       prevWriteWasStreamingChunk = true
       return
     }
 
-    // Two-space indent matches the assistant body spacing used throughout.
+    // 这里统一使用两个空格缩进，和整个 assistant 正文的间距保持一致。
     const body = renderMarkdown(content)
     const indented = normalizeLineEndings(body)
       .split('\n')
       .map((line) => (line ? `  ${line}` : line))
       .join('\n')
     if (msg.streamingChunk) {
-      // Streaming chunks carry their own trailing newline(s) — renderMarkdown
-      // emits "line\n" for list items, "line\n" for headings, and "line\n\n"
-      // when a block is followed by a paragraph-break space token. The
-      // indented `  ${line}` mapping preserves those trailing \ns as-is.
+      // Streaming chunk 自带尾随换行 - renderMarkdown 会让列表项输出
+      // `"line\n"`、标题输出 `"line\n"`，如果一个 block 后面跟着段落
+      // 断点 token，则会输出 `"line\n\n"`。这里的 `  ${line}` 缩进映射
+      // 会原样保留这些结尾的 \n。
       //
-      // We MUST ensure the chunk ends in at least one \n so the cursor
-      // advances to the next row: the subsequent frame redraw starts from
-      // wherever writeMessage left the cursor, and if we emit text without
-      // a newline, the next row-0 of the frame overwrites the chunk text.
-      // Belt-and-suspenders: append one \n if renderMarkdown returned a
-      // trailing-newline-less body (theoretically possible for unknown
-      // token shapes or the catch-fallback plain-text path).
+      // 我们必须确保 chunk 至少以一个 \n 结尾，这样光标才能真的
+      // 前进到下一行：后续的 frame 重绘会从 writeMessage 留下的光标
+      // 位置开始，如果这里不换行，下一帧的 row-0 就会把 chunk 文本
+      // 直接盖掉。保险起见，如果 renderMarkdown 返回了一个没有尾随
+      // 换行的 body（理论上可能发生在未知 token 形态或 catch 回退的
+      // 纯文本路径里），这里就补一个。
       const out = indented.endsWith('\n') ? indented : indented + '\n'
       write(toCRLF(out))
-      // A streaming chunk that ends with `\n\n` is a paragraph-break
-      // boundary (renderMarkdown puts \n\n after a heading + blank line
-      // pair, etc.) — the next entity sits below a real blank row.
-      // Anything else only ended with a single `\n`, so we still need
-      // the next entity to draw its own blank above.
+      // 如果 streaming chunk 以 `\n\n` 结尾，就说明它已经到达了一个
+      // 真正的段落断点（比如 heading + blank line 这种结构之后）。
+      // 这时下一条实体会落在一个真实的空白行下面。其它情况则只以
+      // 单个 `\n` 结尾，所以还需要下一条实体自己再补一个空白。
       prevWriteEndedWithBlankRow = out.endsWith('\n\n')
       prevWriteWasStreamingChunk = true
     } else {
@@ -419,14 +398,14 @@ export function writeMessageToStdout(write: InkWrite, msg: DisplayMessage): void
 }
 
 /**
- * Echo a user message in full. For multi-line content we indent continuation
- * lines with two spaces so they align under the text that followed the `❯`
- * prompt glyph on the first line. `content` is assumed to have already been
- * normalized to use `\n` line separators.
+ * 原样回显一条用户消息。
+ * 对于多行内容，我们会把后续行缩进两个空格，这样它们会和第一行里
+ * 跟在 `❯` prompt glyph 后面的文本对齐。这里假设 `content` 已经被
+ * 归一化成 `\n` 分隔。
  *
- * `compact` is set for slash-command echoes: we drop the trailing blank
- * line so the `  ⎿  result` line that follows sits flush under the echo,
- * matching Claude Code's 2-line command block.
+ * `compact` 用在 slash-command 的回显里：我们会去掉尾随空白行，这样
+ * 后面的 `  ⎿  result` 行就能紧贴在回显下面，形成和 Claude Code
+ * 一样的 2 行命令块。
  */
 function writeUserMessage(write: InkWrite, content: string, compact = false): void {
   const arrow = c.hex(PROMPT_BORDER)(GLYPH_PROMPT_ARROW)
@@ -434,9 +413,9 @@ function writeUserMessage(write: InkWrite, content: string, compact = false): vo
   const [first = '', ...rest] = lines
   const indentedRest = rest.map((line) => `  ${line}`)
   const body = [`${arrow} ${first}`, ...indentedRest].join('\n')
-  // Leading \n gives one blank row of margin-top so the echo doesn't
-  // crowd against the previous assistant reply's last line of content.
-  // Explicit CRLF line breaks — see toCRLF() above for rationale.
+  // 前面的 \n 会先留出一行 margin-top，这样回显就不会和上一个
+  // assistant 回复的最后一行内容挤在一起。
+  // 这里使用显式 CRLF 换行 - 原因见上面的 toCRLF()。
   const trailing = compact ? '\n' : '\n\n'
   write(toCRLF('\n' + body + trailing))
 }

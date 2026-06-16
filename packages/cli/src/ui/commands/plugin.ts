@@ -1,15 +1,13 @@
-// @x-code-cli/cli — /plugin slash command handler family.
+// @x-code-cli/cli - /plugin slash 命令处理器家族。
 //
-// Extracted from App.tsx as a single factory that closes over the deps the
-// plugin subcommands need: the four sub-registries (plugin / skill / sub-
-// agent / command), the MCP registry (for restart-in-same-pass refresh),
-// the hook bus, the prompt-cache invalidator, and the skill-registry
-// version bumper (so /help and tab completion recompute).
+// 从 App.tsx 中抽出来的单一工厂函数，会闭包捕获 plugin 子命令需要的依赖：
+// 四个子 registry（plugin / skill / sub-agent / command）、MCP registry
+//（用于同一轮内的 refresh）、hook bus、prompt cache 失效器，以及
+// skill-registry 版本计数器（让 /help 和 tab completion 重新计算）。
 //
-// Subcommands: list / info / install / uninstall / enable / disable /
-// search / update / refresh / doctor / marketplace (with its own
-// add / remove / list / refresh / info sub-tree). Unknown sub prints
-// the usage hint.
+// 子命令包括：list / info / install / uninstall / enable / disable /
+// search / update / refresh / doctor / marketplace（它还有自己的
+// add / remove / list / refresh / info 子树）。未知子命令会打印用法提示。
 import {
   addKnownMarketplace,
   clearPluginEntry,
@@ -46,10 +44,10 @@ function formatPluginSource(s: PluginSource | undefined): string {
   return `github:${s.owner}/${s.repo}${s.ref ? `#${s.ref}` : ''}`
 }
 
-/** Parse a `/plugin enable|disable` argument string, recognizing the
- *  shared `--scope=user|project` / `-s=user|project` flag (same parser
- *  shape as parseSkillScopeFlag). Default scope = 'user' so terse
- *  invocations stay terse. */
+/** 解析 `/plugin enable|disable` 的参数字符串，并识别共享的
+ *  `--scope=user|project` / `-s=user|project` 标志。
+ *  解析形状和 `parseSkillScopeFlag` 相同。
+ *  默认 scope = 'user'，这样短命令还是短命令。 */
 function parsePluginScopeFlag(arg: string): { id: string; scope: PluginScope } {
   const tokens = arg.split(/\s+/).filter(Boolean)
   let scope: PluginScope = 'user'
@@ -75,11 +73,12 @@ export function createPluginCommandHandler(deps: PluginCommandDeps) {
       addCommandMessage(text, 'Plugin system is disabled for this session (`--no-plugins`).')
       return
     }
-    // Optional filters: --enabled (only on), --disabled (only off), no flag = all.
+    // 可选过滤器：`--enabled` 只看开启的、`--disabled` 只看关闭的，
+    // 不传则看全部。
     const tokens = raw.trim().split(/\s+/).filter(Boolean)
     let filter: 'all' | 'enabled' | 'disabled' = 'all'
     for (const t of tokens) {
-      // Skip the subcommand word itself ('list') if present
+      // 如果子命令词本身（`list`）也出现在参数里，就跳过它。
       if (t === 'list') continue
       if (t === '--enabled') filter = 'enabled'
       else if (t === '--disabled') filter = 'disabled'
@@ -174,7 +173,7 @@ export function createPluginCommandHandler(deps: PluginCommandDeps) {
           '  Sources:\n' +
           '    `<name>@<marketplace>` — look up + install from subscribed marketplace\n' +
           '    `github:owner/repo[#ref]` — install from a GitHub repo\n' +
-          '    `https://...` or `git@...` — install from any git URL\n' +
+          '    `https://...` or `git@...` — 从任意 git URL 安装\n' +
           '    `/abs/path` or `./relative/path` — install from a local directory',
       )
       return
@@ -367,9 +366,9 @@ export function createPluginCommandHandler(deps: PluginCommandDeps) {
     if (!all && positional.length === 0) {
       addCommandMessage(
         text,
-        'Usage: `/plugin update <id>` · `/plugin update --all`\n' +
-          '  `<id>`: a `name@marketplace` from `/plugin list`\n' +
-          '  `--all`: update every installed plugin (sequential, skip-on-error)',
+        '用法：`/plugin update <id>` · `/plugin update --all`\n' +
+          '  `<id>`：来自 `/plugin list` 的 `name@marketplace`\n' +
+          '  `--all`：更新所有已安装插件（顺序执行，出错则跳过）',
       )
       return
     }
@@ -377,10 +376,10 @@ export function createPluginCommandHandler(deps: PluginCommandDeps) {
     if (all) {
       const records = await listInstalledPlugins()
       if (records.length === 0) {
-        addCommandMessage(text, 'No plugins installed.')
+        addCommandMessage(text, '没有已安装的插件。')
         return
       }
-      addCommandMessage(text, `Updating ${records.length} plugin${records.length === 1 ? '' : 's'} …`)
+      addCommandMessage(text, `正在更新 ${records.length} 个插件…`)
       const lines: string[] = []
       let updated = 0
       let unchanged = 0
@@ -393,7 +392,7 @@ export function createPluginCommandHandler(deps: PluginCommandDeps) {
             expectedName: rec.name,
           })
           if (result.manifest.version === rec.version) {
-            lines.push(`  ${rec.id}: reinstalled at ${rec.version}`)
+            lines.push(`  ${rec.id}: 已按 ${rec.version} 重新安装`)
             unchanged++
           } else {
             lines.push(`  ${rec.id}: ${rec.version} → ${result.manifest.version}`)
@@ -404,8 +403,8 @@ export function createPluginCommandHandler(deps: PluginCommandDeps) {
           failed++
         }
       }
-      lines.push('', `Summary: ${updated} updated, ${unchanged} unchanged, ${failed} failed.`)
-      if (updated > 0) lines.push('Run `/plugin refresh` to load the new versions.')
+      lines.push('', `总结：${updated} 个已更新，${unchanged} 个未变化，${failed} 个失败。`)
+      if (updated > 0) lines.push('运行 `/plugin refresh` 以加载新版本。')
       addCommandMessage(text, lines.join('\n'))
       return
     }
@@ -417,7 +416,7 @@ export function createPluginCommandHandler(deps: PluginCommandDeps) {
       addCommandMessage(text, `Plugin \`${id}\` not installed.`)
       return
     }
-    addCommandMessage(text, `Reinstalling **${id}** from ${formatPluginSource(rec.source)} …`)
+    addCommandMessage(text, `正在从 ${formatPluginSource(rec.source)} 重新安装 **${id}**…`)
     try {
       const result = await installPlugin({
         source: rec.source,
@@ -426,9 +425,9 @@ export function createPluginCommandHandler(deps: PluginCommandDeps) {
       })
       const versionMsg =
         result.manifest.version === rec.version
-          ? `Reinstalled at the same version (${rec.version}).`
-          : `Updated ${rec.version} → ${result.manifest.version}.`
-      addCommandMessage(text, `${versionMsg} Run \`/plugin refresh\` to load the new version.`)
+          ? `已按相同版本重新安装（${rec.version}）。`
+          : `已从 ${rec.version} 更新到 ${result.manifest.version}。`
+      addCommandMessage(text, `${versionMsg} 运行 \`/plugin refresh\` 以加载新版本。`)
     } catch (err) {
       addCommandMessage(text, `Update failed: ${err instanceof Error ? err.message : String(err)}`)
     }
@@ -460,35 +459,35 @@ export function createPluginCommandHandler(deps: PluginCommandDeps) {
 
     const parts: string[] = []
     const p = summary.plugins
-    if (p.added.length) parts.push(`added: ${p.added.join(', ')}`)
-    if (p.removed.length) parts.push(`removed: ${p.removed.join(', ')}`)
-    if (p.changed.length) parts.push(`changed: ${p.changed.join(', ')}`)
-    if (parts.length === 0) parts.push(`no plugin changes (${p.unchanged.length} unchanged)`)
-    const lines = [`Reloaded plugins — ${parts.join('; ')}.`]
+    if (p.added.length) parts.push(`新增：${p.added.join(', ')}`)
+    if (p.removed.length) parts.push(`移除：${p.removed.join(', ')}`)
+    if (p.changed.length) parts.push(`变更：${p.changed.join(', ')}`)
+    if (parts.length === 0) parts.push(`没有插件变更（${p.unchanged.length} 个保持不变）`)
+    const lines = [`已重新加载插件 — ${parts.join('；')}。`]
     const subBits: string[] = []
     if (summary.skills && (summary.skills.added.length || summary.skills.removed.length))
-      subBits.push(`${summary.skills.added.length + summary.skills.removed.length} skill change(s)`)
+      subBits.push(`${summary.skills.added.length + summary.skills.removed.length} 个 skill 变更`)
     if (summary.subAgents && (summary.subAgents.added.length || summary.subAgents.removed.length))
-      subBits.push(`${summary.subAgents.added.length + summary.subAgents.removed.length} sub-agent change(s)`)
+      subBits.push(`${summary.subAgents.added.length + summary.subAgents.removed.length} 个子代理变更`)
     if (summary.commands && (summary.commands.added.length || summary.commands.removed.length))
-      subBits.push(`${summary.commands.added.length + summary.commands.removed.length} command change(s)`)
-    if (subBits.length) lines.push(`Downstream: ${subBits.join(', ')}.`)
+      subBits.push(`${summary.commands.added.length + summary.commands.removed.length} 个命令变更`)
+    if (subBits.length) lines.push(`下游影响：${subBits.join('，')}。`)
     if (summary.mcp) {
       const m = summary.mcp
       const mcpBits: string[] = []
-      if (m.added.length) mcpBits.push(`added: ${m.added.join(', ')}`)
-      if (m.removed.length) mcpBits.push(`removed: ${m.removed.join(', ')}`)
-      if (m.changed.length) mcpBits.push(`changed: ${m.changed.join(', ')}`)
-      if (mcpBits.length) lines.push(`MCP — ${mcpBits.join('; ')}.`)
-      else if (m.unchanged.length) lines.push(`MCP — ${m.unchanged.length} server(s) reconnected.`)
+      if (m.added.length) mcpBits.push(`新增：${m.added.join(', ')}`)
+      if (m.removed.length) mcpBits.push(`移除：${m.removed.join(', ')}`)
+      if (m.changed.length) mcpBits.push(`变更：${m.changed.join(', ')}`)
+      if (mcpBits.length) lines.push(`MCP：${mcpBits.join('；')}。`)
+      else if (m.unchanged.length) lines.push(`MCP：${m.unchanged.length} 个 server 重新连接。`)
     }
     if (summary.mcpProjectSkipped) {
-      lines.push('Note: project-level MCP servers were skipped (trust dialog declined).')
+      lines.push('注意：project 级 MCP server 被跳过了（未信任该项目）。')
     }
     for (const e of summary.mcpConfigErrors ?? []) {
-      lines.push(`MCP config error: ${e.name}: ${e.message}`)
+      lines.push(`MCP 配置错误：${e.name}: ${e.message}`)
     }
-    lines.push('Note: next message rebuilds the system prompt, so prompt-cache will miss once.')
+    lines.push('注意：下一条消息会重新构建 system prompt，因此 prompt-cache 会失效一次。')
     addCommandMessage(text, lines.join('\n'))
   }
 
@@ -500,13 +499,13 @@ export function createPluginCommandHandler(deps: PluginCommandDeps) {
     }
     const errors = reg.loadErrors()
     const all = reg.listAll()
-    const lines: string[] = ['**Plugin doctor**']
-    lines.push(`- Total loaded: ${all.length}`)
-    lines.push(`- Enabled:      ${all.filter((p) => p.enabled).length}`)
-    lines.push(`- Disabled:     ${all.filter((p) => !p.enabled).length}`)
-    lines.push(`- Load errors:  ${errors.length}`)
+    const lines: string[] = ['**插件诊断**']
+    lines.push(`- 已加载总数：${all.length}`)
+    lines.push(`- 已启用：      ${all.filter((p) => p.enabled).length}`)
+    lines.push(`- 已禁用：      ${all.filter((p) => !p.enabled).length}`)
+    lines.push(`- 加载错误：    ${errors.length}`)
     if (errors.length > 0) {
-      lines.push('', '**Errors:**')
+      lines.push('', '**错误：**')
       for (const e of errors) {
         lines.push(`- ${e.id ?? '(unknown)'} at \`${e.path}\``)
         lines.push(`  ${e.message}`)
@@ -514,7 +513,7 @@ export function createPluginCommandHandler(deps: PluginCommandDeps) {
     }
     lines.push(
       '',
-      '_For deeper diagnostics (mcp collisions, hook errors, unsupported `commands` contributions), set `DEBUG_STDOUT=1` and check `~/.x-code/logs/debug.log`._',
+      '_如需更深入的诊断（mcp 冲突、hook 错误、不支持的 `commands` 贡献），请设置 `DEBUG_STDOUT=1` 并查看 `~/.x-code/logs/debug.log`。_',
     )
     addCommandMessage(text, lines.join('\n'))
   }
@@ -527,10 +526,10 @@ export function createPluginCommandHandler(deps: PluginCommandDeps) {
     if (sub === '' || sub === 'list') {
       const km = await readKnownMarketplaces()
       if (km.marketplaces.length === 0) {
-        addCommandMessage(text, 'No marketplaces subscribed. Add one with `/plugin marketplace add <name> <source>`.')
+        addCommandMessage(text, '没有已订阅的 marketplace。可用 `/plugin marketplace add <name> <source>` 添加。')
         return
       }
-      const lines = [`**Subscribed marketplaces** (${km.marketplaces.length}):`]
+      const lines = [`**已订阅的 marketplace**（${km.marketplaces.length} 个）：`]
       const namePad = Math.max(...km.marketplaces.map((m) => m.name.length), 8) + 2
       for (const m of km.marketplaces) {
         const tag = m.reservedName ? ' [official]' : ''
@@ -540,12 +539,12 @@ export function createPluginCommandHandler(deps: PluginCommandDeps) {
       return
     }
 
-    if (sub === 'add') {
+      if (sub === 'add') {
       const argParts = rest.split(/\s+/)
       if (argParts.length < 2 || !argParts[0] || !argParts[1]) {
         addCommandMessage(
           text,
-          'Usage: `/plugin marketplace add <name> <source>` (source: `github:owner/repo` or an https URL to a marketplace.json)',
+          '用法：`/plugin marketplace add <name> <source>`（source 可以是 `github:owner/repo`，也可以是指向 marketplace.json 的 https URL）',
         )
         return
       }
@@ -555,7 +554,7 @@ export function createPluginCommandHandler(deps: PluginCommandDeps) {
         await addKnownMarketplace({ name, source })
         addCommandMessage(
           text,
-          `Subscribed to **${name}** (\`${source}\`). Run \`/plugin marketplace refresh ${name}\` to fetch its index.`,
+          `已订阅 **${name}**（\`${source}\`）。运行 \`/plugin marketplace refresh ${name}\` 以拉取索引。`,
         )
       } catch (err) {
         addCommandMessage(text, `Failed: ${err instanceof Error ? err.message : String(err)}`)
@@ -565,12 +564,12 @@ export function createPluginCommandHandler(deps: PluginCommandDeps) {
 
     if (sub === 'remove') {
       if (!rest) {
-        addCommandMessage(text, 'Usage: `/plugin marketplace remove <name>`')
+        addCommandMessage(text, '用法：`/plugin marketplace remove <name>`')
         return
       }
       const result = await removeKnownMarketplace(rest)
-      if (result === 'noop') addCommandMessage(text, `No marketplace \`${rest}\` subscribed.`)
-      else addCommandMessage(text, `Unsubscribed from **${rest}**.`)
+      if (result === 'noop') addCommandMessage(text, `没有订阅 marketplace \`${rest}\`。`)
+      else addCommandMessage(text, `已取消订阅 **${rest}**。`)
       return
     }
 
@@ -578,14 +577,14 @@ export function createPluginCommandHandler(deps: PluginCommandDeps) {
       const km = await readKnownMarketplaces()
       const targets = rest ? km.marketplaces.filter((m) => m.name === rest) : km.marketplaces
       if (targets.length === 0) {
-        addCommandMessage(text, rest ? `No marketplace \`${rest}\` subscribed.` : 'No marketplaces subscribed.')
+        addCommandMessage(text, rest ? `没有订阅 marketplace \`${rest}\`。` : '没有已订阅的 marketplace。')
         return
       }
-      const lines: string[] = [`Refreshing ${targets.length} marketplace${targets.length === 1 ? '' : 's'} …`]
+      const lines: string[] = [`正在刷新 ${targets.length} 个 marketplace…`]
       for (const t of targets) {
         try {
           const m = await fetchMarketplace(t)
-          lines.push(`  ✓ ${t.name} — ${m.plugins.length} plugin${m.plugins.length === 1 ? '' : 's'}`)
+          lines.push(`  ✓ ${t.name} — ${m.plugins.length} 个插件`)
         } catch (err) {
           lines.push(`  ✗ ${t.name} — ${err instanceof Error ? err.message : String(err)}`)
         }
@@ -596,7 +595,7 @@ export function createPluginCommandHandler(deps: PluginCommandDeps) {
 
     if (sub === 'info') {
       if (!rest) {
-        addCommandMessage(text, 'Usage: `/plugin marketplace info <name>`')
+        addCommandMessage(text, '用法：`/plugin marketplace info <name>`')
         return
       }
       const all = await readAllCachedMarketplaces()
@@ -604,7 +603,7 @@ export function createPluginCommandHandler(deps: PluginCommandDeps) {
       if (!m) {
         addCommandMessage(
           text,
-          `No cached index for marketplace \`${rest}\`. Run \`/plugin marketplace refresh ${rest}\` first.`,
+          `没有 marketplace \`${rest}\` 的缓存索引。请先运行 \`/plugin marketplace refresh ${rest}\`。`,
         )
         return
       }
@@ -612,7 +611,7 @@ export function createPluginCommandHandler(deps: PluginCommandDeps) {
       if (m.upstreamName) lines.push(`Upstream name: ${m.upstreamName}`)
       if (m.description) lines.push(m.description)
       if (m.owner?.name) lines.push(`Owner: ${m.owner.name}${m.owner.url ? ` (${m.owner.url})` : ''}`)
-      lines.push('', `${m.plugins.length} plugin${m.plugins.length === 1 ? '' : 's'}:`)
+      lines.push('', `${m.plugins.length} 个插件：`)
       for (const p of m.plugins) {
         const ver = p.verified ? ' [verified]' : ''
         const cat = p.category ? ` (${p.category})` : ''
@@ -623,7 +622,7 @@ export function createPluginCommandHandler(deps: PluginCommandDeps) {
       return
     }
 
-    addCommandMessage(text, 'Usage: `/plugin marketplace <list|add|remove|refresh|info>`')
+    addCommandMessage(text, '用法：`/plugin marketplace <list|add|remove|refresh|info>`')
   }
 
   async function handlePlugin(text: string, arg: string): Promise<void> {

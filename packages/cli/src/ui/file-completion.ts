@@ -1,33 +1,32 @@
-// @x-code-cli/cli — Pure functions powering the @-mention file completion menu.
+// @x-code-cli/cli — `@` 文件补全菜单的纯函数实现。
 //
-// Three responsibilities, kept stateless and side-effect free so they can be
-// unit-tested without a terminal:
+// 这里刻意保持无状态、无副作用，这样可以在没有终端环境的情况下直接做单测：
 //
-//   1. detectAtToken — given the input text + cursor, decide whether the
-//      user is currently editing an `@…` token, and if so where it spans.
-//      The trigger rule (`@` at line start or preceded by whitespace)
-//      mirrors core's extractFileReferences (file-ingest.ts) — the UI must
-//      never propose a path the backend would refuse, otherwise the user
-//      sees the file get suggested but not ingested.
+//   1. detectAtToken：给定输入文本和光标位置，判断用户是否正在编辑一个
+//      `@...` token，如果是，就返回它的范围。触发规则是：
+//      `@` 位于行首，或前面紧挨着空白字符。
+//      这个规则要和 core 里的 extractFileReferences（file-ingest.ts）保持一致，
+//      因为 UI 绝不能推荐一个后端最后又拒绝 ingest 的路径，否则用户会看到
+//      文件被建议出来，却最终没有被真正接收。
 //
-//   2. scoreAndRank — fuzzy-rank a flat list of file/dir entries against
-//      the current query, with basename-vs-fullpath weighting and dotfile
-//      gating (hidden unless the query itself starts with '.').
+//   2. scoreAndRank：对扁平的文件/目录列表做模糊排序，综合考虑 basename
+//      和完整路径的权重，以及点文件门控（只有当查询本身以 `.` 开头时，
+//      才显示隐藏文件）。
 //
-//   3. applyCompletion — splice a chosen entry into the buffer, replacing
-//      the entire @-token (atIdx..tokenEnd) so a user typing through a
-//      half-complete suggestion doesn't end up with a duplicated tail.
+//   3. applyCompletion：把用户选中的条目拼回输入缓冲区，替换整个 @ token
+//     （atIdx..tokenEnd）。这样用户即使在半个补全项后继续输入，也不会
+//      把尾巴重复拼接两次。
 
 export interface AtTrigger {
   /** True when the cursor sits inside an @-token whose '@' is at line
    *  start or preceded by whitespace. */
   active: boolean
-  /** Position of the '@' itself (only meaningful when active). */
+  /** `@` 自身的位置。只有 active=true 时才有意义。 */
   atIdx: number
-  /** Substring between '@' and the cursor — fed to scoreAndRank. */
+  /** `@` 和光标之间的子串，会传给 scoreAndRank 做匹配。 */
   query: string
-  /** Right boundary of the token (first whitespace at-or-after cursor,
-   *  or text.length). applyCompletion replaces text.slice(atIdx, tokenEnd). */
+  /** token 的右边界（光标后第一个空白字符，或 text.length）。
+   *  applyCompletion 会替换 text.slice(atIdx, tokenEnd)。 */
   tokenEnd: number
 }
 
@@ -39,7 +38,7 @@ function isWhitespace(ch: string): boolean {
 
 export function detectAtToken(text: string, cursor: number): AtTrigger {
   if (cursor < 0 || cursor > text.length) return INACTIVE
-  // Walk left from cursor; whitespace before '@' = not in a token.
+  // 从光标向左回扫；如果在遇到 `@` 之前先碰到空白，说明不在 token 里。
   let i = cursor - 1
   while (i >= 0) {
     const ch = text[i] ?? ''
@@ -49,10 +48,10 @@ export function detectAtToken(text: string, cursor: number): AtTrigger {
   }
   if (i < 0 || text[i] !== '@') return INACTIVE
   const atIdx = i
-  // Same prefix rule as file-ingest.ts:114 — keeps `user@host` and
-  // `npm install foo@1.2` from popping the menu.
+  // 这里要和 file-ingest.ts 的前缀规则一致，避免把 `user@host`、
+  // `npm install foo@1.2` 这种普通文本误判成文件引用。
   if (atIdx > 0 && !isWhitespace(text[atIdx - 1] ?? '')) return INACTIVE
-  // Right boundary: scan forward to first whitespace.
+  // 右边界：向前扫描到第一个空白字符。
   let j = cursor
   while (j < text.length && !isWhitespace(text[j] ?? '')) j++
   return {
@@ -64,7 +63,7 @@ export function detectAtToken(text: string, cursor: number): AtTrigger {
 }
 
 export interface FileEntry {
-  /** POSIX-style path relative to cwd. */
+  /** 相对 cwd 的 POSIX 风格路径。 */
   relPath: string
   isDirectory: boolean
 }
@@ -79,8 +78,8 @@ function isHidden(relPath: string): boolean {
   return basename.startsWith('.')
 }
 
-/** Subsequence match with consecutive-run bonus. Returns -Infinity on miss.
- *  Earlier match positions outrank later ones (capped). */
+/** 子序列匹配，连续命中会加分。未命中返回 -Infinity。
+ *  命中位置越靠前，分数越高（有上限）。 */
 function fuzzyScore(target: string, query: string): number {
   if (query.length === 0) return 0
   const t = target.toLowerCase()
@@ -108,15 +107,14 @@ function fuzzyScore(target: string, query: string): number {
 
 function scoreEntry(entry: FileEntry, query: string): number {
   if (query.length === 0) {
-    // Empty query: shallow paths first; alphabetical tie-break is handled
-    // by the outer sort.
+    // 空查询：优先浅层路径；字母顺序的平局处理交给外层排序。
     const depth = entry.relPath.split('/').length
     return -depth
   }
   const slash = entry.relPath.lastIndexOf('/')
   const basename = slash >= 0 ? entry.relPath.slice(slash + 1) : entry.relPath
-  // Basename match weighted heavily so `chat` ranks ChatInput.tsx above
-  // a deep `src/foo/chatter/util.ts`.
+  // basename 命中权重更高，这样查询 `chat` 时，ChatInput.tsx 会排在
+  // 深层的 `src/foo/chatter/util.ts` 前面。
   const baseScore = fuzzyScore(basename, query)
   if (baseScore !== -Infinity) return baseScore * 10
   return fuzzyScore(entry.relPath, query)
@@ -138,10 +136,9 @@ export function scoreAndRank(entries: FileEntry[], query: string): ScoredEntry[]
   return out
 }
 
-/** Splice a picked entry into the buffer, replacing the full @-token.
- *  Directories get a trailing '/' so the user can keep typing a child
- *  path; files don't (cursor stops at the path so the user can keep
- *  composing the prompt). */
+/** 把选中的条目拼回输入缓冲区，并替换掉完整的 @ token。
+ *  目录会带上尾部 `/`，方便用户继续输入子路径；文件则不加斜杠，
+ *  光标停在路径末尾，用户可以继续写提示词。 */
 export function applyCompletion(
   text: string,
   atIdx: number,
