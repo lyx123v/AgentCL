@@ -1,4 +1,4 @@
-// Tests for agent/messages.ts helpers
+// agent/messages.ts 辅助函数测试
 import { describe, expect, it } from 'vitest'
 
 import {
@@ -10,7 +10,7 @@ import {
 } from '../src/agent/messages.js'
 
 describe('toolResultMessage', () => {
-  it('builds a tool-role message with one tool-result content part', () => {
+  it('构造带有一个 tool-result 内容块的 tool 角色消息', () => {
     const msg = toolResultMessage('tc_1', 'shell', 'done')
     expect(msg.role).toBe('tool')
     expect(Array.isArray(msg.content)).toBe(true)
@@ -31,22 +31,22 @@ describe('toolResultMessage', () => {
 })
 
 describe('userMessage', () => {
-  it('wraps a string', () => {
+  it('可以包装字符串输入', () => {
     expect(userMessage('hi')).toEqual({ role: 'user', content: 'hi' })
   })
 
-  it('preserves a parts array', () => {
+  it('会保留 parts 数组结构', () => {
     const parts = [{ type: 'text' as const, text: 'hi' }]
     expect(userMessage(parts)).toEqual({ role: 'user', content: parts })
   })
 })
 
 describe('toolErrorFromUnknown', () => {
-  it('extracts the message from an Error instance', () => {
+  it('可以从 Error 实例中提取消息', () => {
     expect(toolErrorFromUnknown(new Error('disk full'))).toBe('Error: disk full')
   })
 
-  it('stringifies non-Error values', () => {
+  it('会把非 Error 值转成字符串', () => {
     expect(toolErrorFromUnknown('plain string')).toBe('Error: plain string')
     expect(toolErrorFromUnknown(42)).toBe('Error: 42')
     expect(toolErrorFromUnknown(null)).toBe('Error: null')
@@ -55,12 +55,12 @@ describe('toolErrorFromUnknown', () => {
 })
 
 describe('isToolErrorString', () => {
-  it('matches the prefix produced by toolErrorString', () => {
+  it('可以识别 toolErrorString 生成的前缀', () => {
     expect(isToolErrorString(toolErrorString('x'))).toBe(true)
     expect(isToolErrorString('Error: anything')).toBe(true)
   })
 
-  it('returns false for non-error strings', () => {
+  it('面对非错误字符串时返回 false', () => {
     expect(isToolErrorString('File written: foo.ts')).toBe(false)
     expect(isToolErrorString('')).toBe(false)
     expect(isToolErrorString('error: lower-case')).toBe(false)

@@ -1,4 +1,4 @@
-// @x-code-cli/core — AI SDK Provider Registry (multi-model support)
+// @x-code-cli/core — AI SDK 提供方注册表（多模型支持）
 import { zhipu } from 'zhipu-ai-provider'
 
 import { createAlibaba } from '@ai-sdk/alibaba'
@@ -13,6 +13,8 @@ import { createProviderRegistry } from 'ai'
 
 import { getProviderOptions } from '../config/index.js'
 
+/** 根据当前环境变量里的 provider 配置，构建 AI SDK 使用的模型注册表。
+ *  只有实际配置了凭证或必要参数的提供方才会被注册进去。 */
 export function createModelRegistry() {
   const opts = getProviderOptions()
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -32,7 +34,7 @@ export function createModelRegistry() {
   if (opts.zhipu) providers.zhipu = zhipu
   if (opts.moonshotai) providers.moonshotai = createMoonshotAI({ fetch: permanentErrorFetch })
 
-  // Custom OpenAI compatible provider
+  // 自定义 OpenAI 兼容提供方
   if (opts.custom.apiKey && opts.custom.baseURL) {
     providers.custom = createOpenAICompatible({
       name: 'custom',
@@ -46,19 +48,18 @@ export function createModelRegistry() {
 }
 
 /**
- * Back-fill `reasoning_content: ""` on every assistant message in the request
- * body before it reaches DeepSeek V4. The upstream `@ai-sdk/deepseek` converter
- * (convert-to-deepseek-chat-messages.ts) strips `reasoning_content` from any
- * assistant message at or before the last user message — correct for
- * deepseek-reasoner (R1), which forbids passing reasoning back, but wrong for
- * deepseek-v4-*, which *requires* it. Without this, the second turn 400s with
- * "reasoning_content in the thinking mode must be passed back to the API."
- * Scoped to v4 so R1 keeps its documented behavior. Remove once upstream
- * differentiates by model.
+ * 在请求体到达 DeepSeek V4 之前，为每条 assistant 消息补上
+ * `reasoning_content: ""`。
+ * 上游 `@ai-sdk/deepseek` 的转换器（convert-to-deepseek-chat-messages.ts）
+ * 会移除最后一条 user 消息及其之前 assistant 消息上的 `reasoning_content`。
+ * 这对禁止回传推理内容的 deepseek-reasoner（R1）是正确的，但对“必须回传”
+ * 的 deepseek-v4-* 则是错误的。否则第二轮请求会直接 400，并提示
+ * “thinking 模式下必须把 reasoning_content 传回 API”。
+ * 这里只对 v4 族生效，避免影响 R1 的既有行为；等上游按模型区分后可移除。
  */
 const deepseekReasoningFetch: typeof fetch = async (input, init) => {
-  // Forward through permanentErrorFetch so DeepSeek requests get BOTH
-  // the v4 reasoning_content backfill AND the billing-error short-circuit.
+  // 继续走 permanentErrorFetch，这样 DeepSeek 请求既能获得
+  // v4 的 reasoning_content 回填，也能共享账单类错误的快速短路逻辑。
   if (!init?.body || typeof init.body !== 'string') return permanentErrorFetch(input, init)
 
   try {
@@ -72,23 +73,23 @@ const deepseekReasoningFetch: typeof fetch = async (input, init) => {
       return permanentErrorFetch(input, { ...init, body: JSON.stringify(body) })
     }
   } catch {
-    // Body wasn't JSON we recognize — pass through unchanged.
+    // 请求体不是我们能识别的 JSON，保持原样透传。
   }
 
   return permanentErrorFetch(input, init)
 }
 
 /**
- * Body-keyword → non-retryable status mapping. SDK's `APICallError` marks
- * 408 / 409 / 429 / 5xx as `isRetryable: true`; any 4xx outside that set is
- * non-retryable. Each entry below catches a "this will never succeed by
- * retrying" failure mode that providers nonetheless return with retryable
- * status codes (most commonly Moonshot using 429 for billing). Pick a
- * semantically-honest target status so `classifyApiError` downstream can
- * also use the status alone to emit the right recovery hint.
+ * 将“响应体关键字”映射为“不可重试状态码”。
+ * SDK 的 `APICallError` 会把 408 / 409 / 429 / 5xx 统一标记为
+ * `isRetryable: true`；除此之外的 4xx 则视为不可重试。下面这些规则用于捕获：
+ * 某些提供方明明返回的是“重试也不会成功”的错误，却仍然套用了可重试状态码
+ * （最常见的是 Moonshot 把余额问题返回成 429）。
+ * 我们把它们改写成语义更准确的状态码，这样下游 `classifyApiError`
+ * 也能仅凭状态码给出正确恢复提示。
  *
- * Order matters: first category whose pattern matches wins. Keep billing /
- * context-length above content-policy / auth — they are the most specific.
+ * 顺序很重要：按第一个命中的分类生效。账单 / 上下文长度相关的匹配要放在
+ * 内容策略 / 鉴权之前，因为前者语义更具体。
  */
 type PermanentErrorMatcher = string | RegExp
 
@@ -98,13 +99,12 @@ const PERMANENT_ERROR_CATEGORIES: ReadonlyArray<{
   patterns: readonly PermanentErrorMatcher[]
 }> = [
   {
-    // 402 Payment Required — account out of funds / quota exhausted.
-    // Real example: Moonshot returns HTTP 429 with body
+    // 402 Payment Required：账户余额不足或额度耗尽。
+    // 真实案例：Moonshot 会用 HTTP 429 返回：
     // `{"error":{"message":"... is suspended due to insufficient balance,
-    //   please recharge ...","type":"exceeded_current_quota_error"}}`.
-    // DeepSeek returns "Insufficient Balance" with HTTP 400 (already
-    // non-retryable; rewriting to 402 only normalizes the status so the
-    // classifier emits the same friendly hint).
+    //   please recharge ...","type":"exceeded_current_quota_error"}}`
+    // DeepSeek 会用 HTTP 400 返回 “Insufficient Balance”。
+    // 后者本来就不可重试；这里改成 402 只是为了统一状态码，让分类器输出一致提示。
     status: 402,
     statusText: 'Payment Required',
     patterns: [
@@ -119,9 +119,8 @@ const PERMANENT_ERROR_CATEGORIES: ReadonlyArray<{
     ],
   },
   {
-    // 413 Payload Too Large — prompt exceeded the model's context window.
-    // Same prompt will keep overflowing — only /compact or /clear or a
-    // model swap fixes it.
+    // 413 Payload Too Large：提示词超出模型上下文窗口。
+    // 同一份 prompt 重试仍然会溢出，只有 /compact、/clear 或换模型才有用。
     status: 413,
     statusText: 'Payload Too Large',
     patterns: [
@@ -134,9 +133,8 @@ const PERMANENT_ERROR_CATEGORIES: ReadonlyArray<{
     ],
   },
   {
-    // 422 Unprocessable Entity — provider's safety filter blocked the
-    // request or response. Retrying the same content reproduces the same
-    // block; the user has to rephrase or switch models.
+    // 422 Unprocessable Entity：请求或响应被提供方安全策略拦截。
+    // 同样内容重试还是会被拦，用户只能改写内容或切换模型。
     status: 422,
     statusText: 'Unprocessable Entity',
     patterns: [
@@ -151,9 +149,9 @@ const PERMANENT_ERROR_CATEGORIES: ReadonlyArray<{
     ],
   },
   {
-    // 401 Unauthorized — auth-related failures that occasionally leak
-    // through a 5xx or 429 due to upstream proxy / gateway misconfig.
-    // Retrying with the same (bad) key fails identically.
+    // 401 Unauthorized：鉴权失败。
+    // 有些上游代理 / 网关配置异常时会错误地把它包成 5xx 或 429，
+    // 但使用同一把错误 key 重试只会得到同样结果。
     status: 401,
     statusText: 'Unauthorized',
     patterns: [
@@ -166,11 +164,10 @@ const PERMANENT_ERROR_CATEGORIES: ReadonlyArray<{
     ],
   },
   {
-    // 404 Not Found — model id is wrong, deprecated, or not enabled for
-    // this account. Some providers return 5xx instead of 404 when the
-    // model alias is unrecognized; this normalizes it. The regex catches
-    // OpenAI's "The model `gpt-x` does not exist or you do not have
-    // access..." where the model name sits between the two tokens.
+    // 404 Not Found：模型 id 错误、已废弃，或当前账号未开通。
+    // 某些提供方在模型别名无法识别时会错误返回 5xx，这里统一规范化。
+    // 其中正则用于匹配 OpenAI 风格的：
+    // “The model `gpt-x` does not exist or you do not have access...”
     status: 404,
     statusText: 'Not Found',
     patterns: ['model_not_found', 'model not found', 'unknown model', /\bmodel\b[^]*?\bdoes not exist\b/],
@@ -178,23 +175,20 @@ const PERMANENT_ERROR_CATEGORIES: ReadonlyArray<{
 ] as const
 
 /**
- * Intercept upstream error responses (4xx / 5xx) that describe a permanent
- * failure but use a retryable HTTP status, and rewrite their status to a
- * non-retryable code BEFORE the AI SDK parses them. SDK's `APICallError`
- * constructor computes `isRetryable` from the status — anything outside
- * {408, 409, 429, 5xx} comes out false — so the SDK's
- * `_retryWithExponentialBackoff` bails on the first attempt instead of
- * burning ~30s and a `RetryError` wrapper on a problem retries cannot fix.
+ * 拦截那些“语义上是永久失败、状态码却被错误标成可重试”的上游错误响应
+ * （4xx / 5xx），并在 AI SDK 解析前把它们改写成不可重试状态码。
+ * SDK 的 `APICallError` 会根据状态码计算 `isRetryable`；凡是不在
+ * `{408, 409, 429, 5xx}` 里的状态码都会被视为不可重试，因此
+ * `_retryWithExponentialBackoff` 会在首轮就停止，而不是白白消耗约 30 秒，
+ * 最后再包一层 `RetryError` 返回一个本来就不可能靠重试修复的问题。
  *
- * Body-detection only — error responses without a matching keyword pass
- * through unchanged, so real rate limits / network blips / 5xx hiccups
- * still benefit from SDK's normal retry. Successful responses (`< 400`)
- * are never read so SSE streams are untouched.
+ * 这里只做响应体关键字识别。没有命中关键字的错误响应会原样放行，这样真正的
+ * 限流、网络抖动、临时 5xx 仍然能享受 SDK 默认重试。成功响应（`< 400`）
+ * 永远不会读取响应体，因此不会影响 SSE 流。
  */
 const permanentErrorFetch: typeof fetch = async (input, init) => {
   const response = await fetch(input, init)
-  // Streaming/successful responses are off-limits: reading their body would
-  // consume the SSE stream the SDK is about to parse.
+  // 流式响应或成功响应不能动；如果读取其响应体，会把 SDK 即将解析的 SSE 流消费掉。
   if (response.status < 400) return response
 
   const text = await response
@@ -207,11 +201,10 @@ const permanentErrorFetch: typeof fetch = async (input, init) => {
   for (const category of PERMANENT_ERROR_CATEGORIES) {
     const hit = category.patterns.some((p) => (typeof p === 'string' ? lower.includes(p) : p.test(lower)))
     if (!hit) continue
-    // No-op when the provider already used the right status code.
+    // 如果提供方本来就返回了正确状态码，则无需改写。
     if (response.status === category.status) return response
-    // Preserve the body verbatim — the SDK's error parser still extracts
-    // the provider's message field from it, which classifyApiError then
-    // sees and routes to the right friendly hint.
+    // 保留原始响应体不变，这样 SDK 的错误解析器仍能提取提供方自己的 message，
+    // 下游 classifyApiError 也就还能据此给出更友好的恢复提示。
     return new Response(text, {
       status: category.status,
       statusText: category.statusText,

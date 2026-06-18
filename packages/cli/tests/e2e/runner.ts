@@ -1,15 +1,15 @@
 #!/usr/bin/env tsx
-// e2e runner. Entry point invoked via `pnpm test:e2e`.
+// e2e 运行器入口，通过 `pnpm test:e2e` 调用。
 //
-// Modes (mutually exclusive; if none provided, runs interactive flow):
-//   --resume         Re-run scenarios that failed (or never ran) in last-run.json
-//   --all            Re-run every scenario, fresh
-//   --filter <glob>  Substring match against scenario id (e.g. --filter shell)
-//   --list           Just list scenarios + skip status, exit
-//   --model <id>     Skip interactive model selection, use this model id (or alias)
-//   --keep-tmp       Don't delete tmp dirs even on pass (debugging only)
-//   --max-turns N    Pass through to CLI
-//   --print-jsonl    Print each scenario's jsonl path after running
+// 运行模式（互斥；若都不传则走交互流程）：
+//   --resume         仅重跑 last-run.json 中失败或未跑过的场景
+//   --all            全量重跑所有场景
+//   --filter <glob>  按场景 id 子串匹配（例如 --filter shell）
+//   --list           仅列出场景和跳过状态后退出
+//   --model <id>     跳过交互式模型选择，直接使用该模型 id（或别名）
+//   --keep-tmp       即使成功也不删除临时目录（仅调试时使用）
+//   --max-turns N    透传给 CLI
+//   --print-jsonl    场景运行后打印对应 jsonl 路径
 import * as p from '@clack/prompts'
 
 import { existsSync } from 'node:fs'
@@ -36,6 +36,7 @@ const CLI_BIN = path.resolve(__dirname, '..', '..', 'dist', 'cli.js')
 const SCENARIOS_DIR = path.resolve(__dirname, 'scenarios')
 const DEFAULT_TIMEOUT_MS = 180_000
 
+// 解析命令行参数，整理出运行器需要的开关配置。
 function parseArgs(argv: string[]): {
   resume: boolean
   all: boolean
@@ -70,26 +71,28 @@ function parseArgs(argv: string[]): {
   return out
 }
 
+// 打印帮助信息，方便快速查看支持的运行参数。
 function printHelp(): void {
-  console.log(`X-Code CLI — e2e suite runner
+  console.log(`X-Code CLI - e2e 测试运行器
 
-Usage:
+用法：
   pnpm test:e2e [flags]
 
-Flags:
-  --all                Run every scenario (skip resume logic)
-  --resume             Run only scenarios that failed (or were skipped) last time
-  --filter <substr>    Run only scenarios whose id matches substring
-  --model <id|alias>   Skip prompt; use this model (default: ${DEFAULT_MODEL})
-  --list               List scenarios + last-run status, then exit
-  --keep-tmp           Keep tmpdir after pass (failures keep regardless)
-  --print-jsonl        Print path to session jsonl after each scenario
-  --max-turns N        Pass --max-turns N through to the CLI
+参数：
+  --all                运行所有场景（跳过续跑逻辑）
+  --resume             仅运行上次失败或跳过的场景
+  --filter <substr>    仅运行 id 中包含该子串的场景
+  --model <id|alias>   跳过选择提示，直接使用该模型（默认：${DEFAULT_MODEL}）
+  --list               列出场景和上次运行状态后退出
+  --keep-tmp           成功后也保留临时目录（失败本来就会保留）
+  --print-jsonl        每个场景运行后打印 session jsonl 路径
+  --max-turns N        将 --max-turns N 透传给 CLI
 
-By default (no mode flag) runs interactively, prompting for model + scope.
+默认情况下（未提供模式参数）会进入交互流程，先选择模型，再选择运行范围。
 `)
 }
 
+// 加载 `scenarios/` 目录下的所有场景模块，并按文件名顺序返回。
 async function loadScenarios(): Promise<Scenario[]> {
   const entries = await fs.readdir(SCENARIOS_DIR)
   const tsFiles = entries.filter((e) => e.endsWith('.ts')).sort()
@@ -103,11 +106,13 @@ async function loadScenarios(): Promise<Scenario[]> {
   return scenarios
 }
 
+// 为单个场景创建独立临时目录，避免场景间互相污染。
 async function setupTmpDir(scenarioId: string): Promise<string> {
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), `xc-e2e-${scenarioId}-`))
   return tmp
 }
 
+// 尽力清理临时目录，清理失败时不影响主流程继续。
 async function cleanupTmpDir(dir: string): Promise<void> {
   try {
     await fs.rm(dir, { recursive: true, force: true })
@@ -116,6 +121,7 @@ async function cleanupTmpDir(dir: string): Promise<void> {
   }
 }
 
+// 运行单个场景，构造上下文、收集结果，并在失败时保留调试线索。
 async function runOne(
   scenario: Scenario,
   modelId: string,
@@ -209,7 +215,7 @@ async function runOne(
       tmpDir,
     }
     if (lastJsonl) {
-      // Copy the failing jsonl out so it survives the tmpdir nuke if the user retries.
+      // 把失败 jsonl 额外复制出来，避免用户重试时临时目录被删掉后无法排查。
       try {
         const stash = path.join(__dirname, '.state', `failed-${scenario.id}.jsonl`)
         await fs.mkdir(path.dirname(stash), { recursive: true })
@@ -223,12 +229,13 @@ async function runOne(
     await cleanupTmpDir(tmpDir)
   }
   if (result.status === 'failed') {
-    // Surface tmpDir on failure so user can inspect.
+    // 失败时显式回传 tmpDir，方便用户自行检查现场。
     result.tmpDir = tmpDir
   }
   return result
 }
 
+// 根据筛选条件与续跑状态，挑出本次真正需要执行的场景。
 function pickScenarios(
   scenarios: Scenario[],
   filter: string | undefined,
@@ -239,30 +246,31 @@ function pickScenarios(
   if (filter) chosen = chosen.filter((s) => s.id.includes(filter) || s.name.includes(filter))
   if (resume && state) {
     const failed = new Set(failedIds(state))
-    // Resume = scenarios that failed OR were never run before.
+    // 续跑模式 = 上次失败的场景，或者之前从未运行过的场景。
     chosen = chosen.filter((s) => failed.has(s.id) || !state.results[s.id])
   }
   return chosen
 }
 
+// 交互式选择模型，并把默认模型放在候选列表最前面。
 async function interactiveSelectModel(env: Record<string, string>, defaultModel: string): Promise<string> {
   const opts = availableModels(env)
   if (opts.length === 0) {
-    console.error('❌ No API keys detected in env / .env. Set DEEPSEEK_API_KEY (or another) and retry.')
+    console.error('❌ 未在环境变量或 .env 中检测到 API Key。请设置 DEEPSEEK_API_KEY（或其他可用 key）后重试。')
     process.exit(1)
   }
   const detected = describeDetectedKeys(env)
   if (detected.length > 0) {
-    console.log('Detected API keys:')
+    console.log('已检测到以下 API Key：')
     for (const line of detected) console.log(line)
     console.log()
   }
 
-  // Build options list with default first.
+  // 先构建选择项列表，并把默认模型放到最前面。
   const seen = new Set<string>()
   const items: { value: string; label: string; hint?: string }[] = []
   if (opts.some((o) => o.modelId === defaultModel)) {
-    items.push({ value: defaultModel, label: defaultModel, hint: 'default' })
+    items.push({ value: defaultModel, label: defaultModel, hint: '默认' })
     seen.add(defaultModel)
   }
   for (const o of opts) {
@@ -272,30 +280,31 @@ async function interactiveSelectModel(env: Record<string, string>, defaultModel:
   }
 
   const picked = await p.select({
-    message: 'Select model to test with',
+    message: '请选择用于测试的模型',
     options: items,
     initialValue: items[0]?.value,
   })
   if (p.isCancel(picked)) {
-    p.cancel('Cancelled.')
+    p.cancel('已取消。')
     process.exit(0)
   }
   return picked as string
 }
 
+// 根据上次运行结果，交互式选择全量运行还是仅续跑失败场景。
 async function interactiveSelectMode(state: RunState | null): Promise<'all' | 'resume' | 'cancel'> {
   if (!state) return 'all'
   const sum = summarize(state)
   if (sum.failed === 0) {
-    console.log(`Last run: ${sum.passed} passed, 0 failed, ${sum.skipped} skipped — running all fresh.`)
+    console.log(`上次运行结果：${sum.passed} 个通过，0 个失败，${sum.skipped} 个跳过，本次将重新全量执行。`)
     return 'all'
   }
   const picked = await p.select({
-    message: `Last run: ${sum.passed} passed, ${sum.failed} failed, ${sum.skipped} skipped. What now?`,
+    message: `上次运行结果：${sum.passed} 个通过，${sum.failed} 个失败，${sum.skipped} 个跳过。接下来怎么跑？`,
     options: [
-      { value: 'resume', label: `Resume failed (${sum.failed})`, hint: 'recommended after a code change' },
-      { value: 'all', label: `Run all (${sum.total})` },
-      { value: 'cancel', label: 'Cancel' },
+      { value: 'resume', label: `续跑失败场景（${sum.failed}）`, hint: '修完代码后推荐使用' },
+      { value: 'all', label: `全量运行（${sum.total}）` },
+      { value: 'cancel', label: '取消' },
     ],
     initialValue: 'resume',
   })
@@ -303,50 +312,53 @@ async function interactiveSelectMode(state: RunState | null): Promise<'all' | 'r
   return picked as 'all' | 'resume' | 'cancel'
 }
 
+// 统一格式化场景耗时，便于在终端中紧凑展示。
 function fmtDuration(sec: number): string {
   return `${sec.toFixed(1)}s`
 }
 
+// 打印本轮执行摘要，并在失败时附上排查所需的关键信息。
 function printSummary(results: ScenarioResult[]): void {
   console.log()
   console.log('─'.repeat(60))
   const pass = results.filter((r) => r.status === 'passed').length
   const fail = results.filter((r) => r.status === 'failed').length
   const skip = results.filter((r) => r.status === 'skipped').length
-  console.log(`Summary: ${pass} passed, ${fail} failed, ${skip} skipped (${results.length} total)`)
+  console.log(`汇总：${pass} 个通过，${fail} 个失败，${skip} 个跳过（共 ${results.length} 个）`)
 
   const failed = results.filter((r) => r.status === 'failed')
   if (failed.length > 0) {
     console.log()
-    console.log('Failed scenarios:')
+    console.log('失败场景：')
     for (const r of failed) {
       console.log(`  ✗ ${r.id} — ${r.name}`)
-      console.log(`    error: ${r.error?.split('\n').slice(0, 3).join('\n           ') ?? '(no message)'}`)
-      if (r.tmpDir) console.log(`    tmpDir: ${r.tmpDir}`)
+      console.log(`    错误：${r.error?.split('\n').slice(0, 3).join('\n           ') ?? '（无错误信息）'}`)
+      if (r.tmpDir) console.log(`    临时目录：${r.tmpDir}`)
       if (r.lastSessionJsonl) console.log(`    jsonl:  ${r.lastSessionJsonl}`)
-      console.log(`    rerun:  pnpm test:e2e --filter ${r.id} --keep-tmp`)
+      console.log(`    重跑命令：pnpm test:e2e --filter ${r.id} --keep-tmp`)
     }
   }
   console.log()
 }
 
+// 主入口：解析参数、选择模型和范围，并按顺序执行选中的场景。
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2))
 
   if (!existsSync(CLI_BIN)) {
-    console.error(`❌ CLI binary not found at ${CLI_BIN}`)
-    console.error('   Run `pnpm build` first.')
+    console.error(`❌ 未找到 CLI 二进制文件：${CLI_BIN}`)
+    console.error('   请先执行 `pnpm build`。')
     process.exit(1)
   }
 
-  // Load env (.env + process.env)
+  // 加载环境变量（.env + process.env）。
   const env = await loadDotenv()
   const scenarios = await loadScenarios()
 
-  // --list mode: just print and exit.
+  // `--list` 模式只负责展示场景信息，不实际执行。
   if (args.list) {
     const state = await loadState()
-    console.log(`Found ${scenarios.length} scenarios:`)
+    console.log(`共找到 ${scenarios.length} 个场景：`)
     for (const s of scenarios) {
       const last = state?.results[s.id]
       const status = last ? (last.status === 'passed' ? '✓' : last.status === 'failed' ? '✗' : '○') : '·'
@@ -356,7 +368,7 @@ async function main(): Promise<void> {
     return
   }
 
-  // Resolve model
+  // 确定本次使用的模型。
   let modelId: string
   if (args.model) {
     modelId = resolveModelArg(args.model)
@@ -366,22 +378,22 @@ async function main(): Promise<void> {
     modelId = await interactiveSelectModel(env, defaultModel)
   }
 
-  // Resolve scope (resume vs all vs filter)
+  // 确定运行范围（续跑、全量或按过滤器执行）。
   const prevState = await loadState()
   let scope: 'all' | 'resume' | 'cancel'
   if (args.all) scope = 'all'
   else if (args.resume) scope = 'resume'
   else if (args.filter)
-    scope = 'all' // filter alone implies "all matching"
+    scope = 'all' // 单独传 filter 时，表示“运行所有匹配项”。
   else scope = await interactiveSelectMode(prevState)
   if (scope === 'cancel') {
-    console.log('Cancelled.')
+    console.log('已取消。')
     return
   }
 
   const chosen = pickScenarios(scenarios, args.filter, scope === 'resume', prevState)
   if (chosen.length === 0) {
-    console.log('No scenarios matched.')
+    console.log('没有匹配到任何场景。')
     return
   }
 
@@ -392,7 +404,7 @@ async function main(): Promise<void> {
   if (args.filter) console.log(`▶ Filter: ${args.filter}`)
   console.log()
 
-  // Prepare run state. Start fresh for scope='all', or merge resume results.
+  // 准备运行状态：全量执行时从空状态开始，续跑时合并上次记录。
   const state: RunState =
     scope === 'all' || !prevState
       ? { model: modelId, startedAt: new Date().toISOString(), results: {} }

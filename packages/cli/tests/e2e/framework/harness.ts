@@ -1,9 +1,9 @@
-// Harness: spawn `xc -p` in print mode and parse the resulting session jsonl.
+// 测试驱动器：以 print 模式启动 `xc -p`，并解析生成的 session jsonl。
 //
-// Why parse jsonl rather than stdout: stdout in print mode is just the model's
-// final assistant text (no structured tool-call markers). Sessions jsonl has
-// every assistant tool-call + tool-result event in a parse-friendly format
-// that's stable across UI changes. See packages/core/src/agent/session-store.ts.
+// 之所以解析 jsonl 而不是 stdout，是因为 print 模式下 stdout 只包含模型
+// 最终输出的助手文本，不带结构化的工具调用标记。session jsonl 则保留了
+// 每一次 assistant tool-call 和 tool-result 事件，格式更适合测试解析，
+// 也不会随着 UI 变化而失效。见 packages/core/src/agent/session-store.ts。
 import { spawn } from 'node:child_process'
 import fs from 'node:fs/promises'
 import path from 'node:path'
@@ -16,6 +16,7 @@ export interface HarnessConfig {
   defaultTimeoutMs: number
 }
 
+// 在指定目录中运行 CLI，并尽量还原一次场景执行的结构化结果。
 export async function runCliInDir(
   cwd: string,
   prompt: string,
@@ -25,7 +26,7 @@ export async function runCliInDir(
   const args = ['-p', prompt, ...(options?.args ?? [])]
   const env: NodeJS.ProcessEnv = {
     ...process.env,
-    X_CODE_HOME: path.join(cwd, '.x-code-home'), // isolate user-scope ~/.x-code per scenario
+    X_CODE_HOME: path.join(cwd, '.x-code-home'), // 为每个场景隔离用户级 ~/.x-code 数据
     X_CODE_MODEL: cfg.modelId,
     NODE_ENV: 'test',
     NO_COLOR: '1',
@@ -62,22 +63,22 @@ export async function runCliInDir(
   clearTimeout(timer)
 
   if (timedOut) {
-    stderr += `\n[harness] timeout after ${timeoutMs}ms — killed`
+    stderr += `\n[harness] 运行超过 ${timeoutMs}ms，已终止进程`
   }
 
-  // print.ts uses `saveSession().catch()` (fire-and-forget) and then process.exit().
-  // The final jsonl write may not be flushed when the process exits. Poll the
-  // sessions dir until file size stops changing (or up to 2s).
+  // print.ts 使用 `saveSession().catch()` 触发后即忘的方式保存会话，然后直接 process.exit()。
+  // 因此进程退出时，最后一次 jsonl 写入可能尚未真正落盘。这里轮询 sessions 目录，
+  // 直到文件大小稳定下来（或最多等待 2 秒）。
   await waitForJsonlStable(path.join(cwd, '.x-code', 'sessions'))
 
-  // Locate the freshest session jsonl in cwd/.x-code/sessions/
+  // 找出 cwd/.x-code/sessions/ 中最新生成的 session jsonl。
   const sessionJsonlPath = await pickLatestSessionJsonl(path.join(cwd, '.x-code', 'sessions'))
   const parsed = sessionJsonlPath
     ? await parseSessionJsonl(sessionJsonlPath)
     : { assistantText: '', toolCalls: [], tokenUsage: undefined as RunResult['tokenUsage'] }
 
   return {
-    assistantText: parsed.assistantText || stdout, // fallback: stdout already is the assistant text in print mode
+    assistantText: parsed.assistantText || stdout, // 兜底时直接使用 stdout，它在 print 模式下就是助手文本
     toolCalls: parsed.toolCalls,
     stdout,
     stderr,
@@ -88,6 +89,7 @@ export async function runCliInDir(
   }
 }
 
+// 等待 session jsonl 文件写入稳定，避免读取到尚未写完的内容。
 async function waitForJsonlStable(dir: string, maxWaitMs = 2000, pollMs = 100): Promise<void> {
   const deadline = Date.now() + maxWaitMs
   let lastSize = -1
@@ -102,11 +104,11 @@ async function waitForJsonlStable(dir: string, maxWaitMs = 2000, pollMs = 100): 
         size += s.size
       }
     } catch {
-      // dir doesn't exist yet — keep polling
+      // 目录可能还没创建出来，继续轮询即可。
     }
     if (size > 0 && size === lastSize) {
       stableTicks++
-      if (stableTicks >= 2) return // 2 consecutive equal sizes ≈ ~200ms idle
+      if (stableTicks >= 2) return // 连续两次大小相同，近似视为约 200ms 内无写入
     } else {
       stableTicks = 0
       lastSize = size
@@ -115,6 +117,7 @@ async function waitForJsonlStable(dir: string, maxWaitMs = 2000, pollMs = 100): 
   }
 }
 
+// 选择目录中最近写入的 session jsonl 文件。
 async function pickLatestSessionJsonl(dir: string): Promise<string | null> {
   try {
     const entries = await fs.readdir(dir)
@@ -140,6 +143,7 @@ interface ParsedSession {
   tokenUsage?: RunResult['tokenUsage']
 }
 
+// 解析 session jsonl，提取助手文本、工具调用和 token 使用信息。
 async function parseSessionJsonl(filePath: string): Promise<ParsedSession> {
   const raw = await fs.readFile(filePath, 'utf-8')
   const lines = raw.split('\n').filter(Boolean)
@@ -176,7 +180,7 @@ async function parseSessionJsonl(filePath: string): Promise<ParsedSession> {
     if (!message) continue
 
     if (message.role === 'assistant') {
-      // content can be a string or an array of parts
+      // content 可能是纯字符串，也可能是由多个片段组成的数组。
       if (typeof message.content === 'string') {
         assistantPieces.push(message.content)
       } else if (Array.isArray(message.content)) {
@@ -204,7 +208,7 @@ async function parseSessionJsonl(filePath: string): Promise<ParsedSession> {
     }
   }
 
-  // Merge results into the matching tool calls.
+  // 将 tool-result 合并回对应的 tool-call 上，方便测试直接断言。
   for (const tc of toolCalls) {
     const r = resultByCallId.get(tc.toolCallId)
     if (r) {
@@ -220,9 +224,10 @@ async function parseSessionJsonl(filePath: string): Promise<ParsedSession> {
   }
 }
 
+// 统一提取工具结果中的可读文本，兼容不同输出结构。
 function extractToolResultText(output: Record<string, unknown> | undefined): string {
   if (!output) return ''
-  // AI SDK v6 tool-result output shape: { type: 'content', value: [{ type: 'text', text }, ...] }
+  // AI SDK v6 的 tool-result 输出结构：{ type: 'content', value: [{ type: 'text', text }, ...] }
   if (output.type === 'content' && Array.isArray(output.value)) {
     const pieces: string[] = []
     for (const part of output.value as Record<string, unknown>[]) {
@@ -230,9 +235,9 @@ function extractToolResultText(output: Record<string, unknown> | undefined): str
     }
     return pieces.join('')
   }
-  // Some tools push { type: 'text', value: '...' } directly.
+  // 有些工具会直接返回 { type: 'text', value: '...' }。
   if (output.type === 'text' && typeof output.value === 'string') return output.value
-  // Fallback: stringify whole object — at least gives the test something to match.
+  // 兜底：序列化整个对象，至少让测试还能基于文本做匹配。
   try {
     return JSON.stringify(output)
   } catch {

@@ -1,15 +1,14 @@
-// @x-code-cli/core — Read/write `mcpServers` in user / project config.json
+// @x-code-cli/core — 读写用户级 / 项目级 config.json 中的 `mcpServers`
 //
-// Drives `/mcp add` and `/mcp remove`. The job is small but error-prone:
-//   - preserve unrelated top-level fields (theme, model, thinking, etc.)
-//   - preserve other mcpServers entries when adding/removing one
-//   - write atomically so a Ctrl-C mid-write can't corrupt the file
-//   - never read once, write later — re-read at write time so we don't
-//     stomp on a concurrent edit (rare but cheap to guard against)
+// 这个模块驱动 `/mcp add` 与 `/mcp remove`，看起来工作量不大，
+// 但有几个地方特别容易踩坑：
+//   - 不能破坏其他顶层字段（theme、model、thinking 等）
+//   - 添加或删除一个服务时，必须保留其他 mcpServers 条目
+//   - 写入必须原子化，防止 Ctrl-C 中途打断把文件写坏
+//   - 不能“先读一次，稍后再写”而不重读，否则可能覆盖并发修改
 //
-// The writer validates every config it persists against the same Zod
-// schema the loader uses, so add-json input that would be rejected at
-// load time is rejected here instead — fail-fast at the entry point.
+// writer 在落盘前会用与 loader 相同的 Zod schema 再校验一次，
+// 这样 `/mcp add-json` 提交的无效配置会在入口处直接失败，而不是等到下次加载时才爆炸。
 import fs from 'node:fs/promises'
 import path from 'node:path'
 
@@ -20,17 +19,16 @@ import { type McpServerConfig } from './types.js'
 
 export type ConfigScope = 'user' | 'project'
 
-/** Where each scope's config.json lives. Mirrors the same paths the loader
- *  reads from, so a write here is guaranteed to be picked up on the next
- *  load (or `/mcp refresh`). */
+/** 计算指定作用域下 config.json 的绝对路径。
+ *  这里和 loader 读配置使用的是同一路径规则，因此写入结果一定能被后续加载拾取到。 */
 export function getConfigPath(scope: ConfigScope, cwd: string): string {
   if (scope === 'user') return getUserConfigPath()
   return path.join(cwd, XCODE_DIR, 'config.json')
 }
 
-/** Read the parsed JSON object at the given scope. Returns `{}` when the
- *  file doesn't exist, is empty, or is malformed — the caller treats
- *  those uniformly as "no MCP servers configured here yet". */
+/** 读取并解析指定作用域下的 JSON 对象。
+ *  文件不存在、为空或尚未初始化时返回 `{}`；
+ *  但若文件存在且 JSON 非法，则抛错，避免误把损坏文件覆盖掉。 */
 async function readConfigObject(scope: ConfigScope, cwd: string): Promise<Record<string, unknown>> {
   const file = getConfigPath(scope, cwd)
   let raw: string
@@ -45,16 +43,14 @@ async function readConfigObject(scope: ConfigScope, cwd: string): Promise<Record
       return parsed as Record<string, unknown>
     }
   } catch {
-    // Malformed JSON. We deliberately don't overwrite without a parse —
-    // bail and let the caller surface an error. Returning {} here would
-    // mask a corrupt config and writing would clobber whatever was there.
-    throw new Error(`Config file at ${file} is not valid JSON. Fix it manually before running /mcp add or /mcp remove.`)
+    // JSON 已损坏时，明确要求用户先修复，而不是静默覆盖。
+    throw new Error(`配置文件 ${file} 不是合法 JSON。请先手动修复，再执行 /mcp add 或 /mcp remove。`)
   }
   return {}
 }
 
-/** Atomic JSON write: write to tmp, then rename. Trailing newline + 2-space
- *  indent matches the convention used elsewhere (saveUserConfig). */
+/** 以原子方式写回 JSON：先写临时文件，再 rename。
+ *  结尾保留换行，缩进使用 2 空格，与项目里其他配置写法一致。 */
 async function writeConfigObject(scope: ConfigScope, cwd: string, obj: Record<string, unknown>): Promise<void> {
   const file = getConfigPath(scope, cwd)
   await fs.mkdir(path.dirname(file), { recursive: true })
@@ -63,11 +59,11 @@ async function writeConfigObject(scope: ConfigScope, cwd: string, obj: Record<st
   await fs.rename(tmp, file)
 }
 
-/** Where a given server name currently lives. Returned to the App.tsx
- *  caller so `/mcp remove` can auto-target the right scope (and detect
- *  the rare both-scopes ambiguity that forces an explicit --scope). */
+/** 检测某个服务名当前位于哪个配置作用域。
+ *  `/mcp remove` 会用它做自动定位，并识别用户级和项目级同时存在时的歧义情况。 */
 export type DetectScopeResult = { kind: 'not-found' } | { kind: 'user' } | { kind: 'project' } | { kind: 'both' }
 
+/** 判断某个服务名目前存在于用户级、项目级还是两者都存在。 */
 export async function detectScope(name: string, cwd: string): Promise<DetectScopeResult> {
   const [user, project] = await Promise.all([serverExists(name, 'user', cwd), serverExists(name, 'project', cwd)])
   if (user && project) return { kind: 'both' }
@@ -76,6 +72,7 @@ export async function detectScope(name: string, cwd: string): Promise<DetectScop
   return { kind: 'not-found' }
 }
 
+/** 判断某个服务名在指定作用域的配置中是否存在。 */
 export async function serverExists(name: string, scope: ConfigScope, cwd: string): Promise<boolean> {
   const obj = await readConfigObject(scope, cwd)
   const servers = obj.mcpServers
@@ -83,18 +80,15 @@ export async function serverExists(name: string, scope: ConfigScope, cwd: string
   return Object.prototype.hasOwnProperty.call(servers, name)
 }
 
-/** Add a server to the given scope's config.json. Refuses to overwrite —
- *  caller must check duplicates first via `serverExists` and surface a
- *  helpful error including current vs. attempted config. */
+/** 把服务写入指定作用域的 config.json。
+ *  不负责覆盖已存在条目；调用方应先通过 `serverExists` 做重复检查。 */
 export async function writeServerToConfig(
   name: string,
   config: McpServerConfig,
   scope: ConfigScope,
   cwd: string,
 ): Promise<{ path: string }> {
-  // Validate first. Bad JSON via /mcp add-json shouldn't get written and
-  // then explode at next launch — fail at the entry point with a clear
-  // schema error.
+  // 先做 schema 校验，避免无效配置落盘后等到下次启动才失败。
   const validated = parseServerConfig(name, config)
 
   const obj = await readConfigObject(scope, cwd)
@@ -109,11 +103,9 @@ export async function writeServerToConfig(
   return { path: getConfigPath(scope, cwd) }
 }
 
-/** Remove a server from the given scope's config.json. Idempotent: returns
- *  `removed: false` when the name wasn't present (or the file didn't exist).
- *  Leaves the file with an empty `mcpServers: {}` rather than deleting the
- *  field — preserves the spot for future adds and avoids churn that would
- *  surprise users diffing the file in git. */
+/** 从指定作用域移除一个服务。
+ *  这是幂等操作：如果名称不存在，返回 `removed: false` 而不是报错。
+ *  即使删空了，也会保留 `mcpServers: {}`，避免字段来回消失造成 git diff 噪音。 */
 export async function removeServerFromConfig(
   name: string,
   scope: ConfigScope,
@@ -138,10 +130,9 @@ export async function removeServerFromConfig(
   return { path: file, removed: true }
 }
 
-/** Read the current config for `name` from the given scope, for the
- *  "already exists, here's what's there" path of /mcp add. Returns null
- *  if not present. Best-effort: a malformed entry returns null rather
- *  than throwing — the duplicate-check use case shouldn't crash. */
+/** 读取指定作用域下某个服务当前的配置内容。
+ *  主要用于 `/mcp add` 的“已存在，展示现有配置”路径。
+ *  如果配置损坏，这里会尽量返回 null，而不是让重复检查流程直接崩掉。 */
 export async function readServerConfig(name: string, scope: ConfigScope, cwd: string): Promise<unknown | null> {
   try {
     const obj = await readConfigObject(scope, cwd)

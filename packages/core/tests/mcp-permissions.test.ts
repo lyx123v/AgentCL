@@ -6,6 +6,7 @@ import path from 'node:path'
 
 import { McpPermissionStore, classifyDecision } from '../src/mcp/permissions.js'
 
+// 为每个测试创建隔离的 X_CODE_HOME，避免污染本地权限文件。
 function isolate(): string {
   const dir = path.join(os.tmpdir(), 'mcp-perms-test-' + Math.random().toString(36).slice(2))
   process.env.X_CODE_HOME = dir
@@ -21,22 +22,22 @@ describe('McpPermissionStore', () => {
     delete process.env.X_CODE_HOME
   })
 
-  it('starts empty', async () => {
+  it('初始状态为空', async () => {
     const store = new McpPermissionStore()
     expect(await store.isApproved('foo__bar')).toBe(false)
   })
 
-  it('approves for session only without persisting', async () => {
+  it('仅会话授权不会持久化', async () => {
     const store = new McpPermissionStore()
     store.approveForSession('foo__bar')
     expect(await store.isApproved('foo__bar')).toBe(true)
 
-    // New store instance — should still be unapproved (session-only).
+    // 新实例中仍应是未授权状态，因为之前只是会话级授权。
     const store2 = new McpPermissionStore()
     expect(await store2.isApproved('foo__bar')).toBe(false)
   })
 
-  it('approvePermanently persists across instances', async () => {
+  it('approvePermanently 会跨实例持久生效', async () => {
     const store = new McpPermissionStore()
     await store.approvePermanently('foo__bar')
 
@@ -44,7 +45,7 @@ describe('McpPermissionStore', () => {
     expect(await store2.isApproved('foo__bar')).toBe(true)
   })
 
-  it('writes a 0600 file with sorted entries', async () => {
+  it('会写入权限为 0600 且条目有序的文件', async () => {
     const store = new McpPermissionStore()
     await store.approvePermanently('zeta__b')
     await store.approvePermanently('alpha__a')
@@ -55,7 +56,7 @@ describe('McpPermissionStore', () => {
     expect(parsed.alwaysAllow).toEqual(['alpha__a', 'zeta__b'])
   })
 
-  it('ignores re-approving an already-permanent entry', async () => {
+  it('重复永久授权同一条目时会忽略重复写入', async () => {
     const store = new McpPermissionStore()
     await store.approvePermanently('foo__bar')
     await store.approvePermanently('foo__bar')
@@ -64,7 +65,7 @@ describe('McpPermissionStore', () => {
 })
 
 describe('classifyDecision', () => {
-  it('maps callback strings to structured choices', () => {
+  it('会把回调字符串映射为结构化选择', () => {
     expect(classifyDecision('yes')).toBe('allow-once')
     expect(classifyDecision('always')).toBe('allow-always')
     expect(classifyDecision('no')).toBe('deny')

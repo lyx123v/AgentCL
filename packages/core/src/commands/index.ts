@@ -1,4 +1,4 @@
-// @x-code-cli/core — Commands subsystem public surface
+// @x-code-cli/core — commands 子系统对外导出入口
 export type { CommandDefinition } from './types.js'
 export { loadPluginCommands } from './loader.js'
 export type { LoadCommandsOptions } from './loader.js'

@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 import { parseServerConfig, parseServersBlock } from '../src/mcp/config-schema.js'
 
 describe('parseServerConfig', () => {
-  it('accepts a valid stdio config', () => {
+  it('接受合法的 stdio 配置', () => {
     const cfg = parseServerConfig('filesystem', {
       command: 'npx',
       args: ['-y', 'pkg'],
@@ -12,36 +12,36 @@ describe('parseServerConfig', () => {
     expect(cfg).toMatchObject({ command: 'npx', args: ['-y', 'pkg'], env: { FOO: 'bar' } })
   })
 
-  it('accepts a valid http config', () => {
+  it('接受合法的 http 配置', () => {
     const cfg = parseServerConfig('sentry', { url: 'https://mcp.example.com' })
     expect(cfg).toMatchObject({ url: 'https://mcp.example.com' })
   })
 
-  it('rejects config with neither command nor url', () => {
+  it('既没有 command 也没有 url 的配置会被拒绝', () => {
     expect(() => parseServerConfig('bad', { timeout: 100 })).toThrow(/either `command`.*or `url`/)
   })
 
-  it('rejects config with both command and url', () => {
+  it('同时包含 command 和 url 的配置会被拒绝', () => {
     expect(() => parseServerConfig('bad', { command: 'foo', url: 'https://x.com' })).toThrow(/both `command` and `url`/)
   })
 
-  it('rejects malformed url', () => {
+  it('格式错误的 url 会被拒绝', () => {
     expect(() => parseServerConfig('bad', { url: 'not-a-url' })).toThrow()
   })
 
-  it('includes the server name in the error message', () => {
+  it('错误信息中会包含服务器名称', () => {
     expect(() => parseServerConfig('myserver', {})).toThrow(/mcpServers\.myserver/)
   })
 })
 
 describe('parseServersBlock', () => {
-  it('returns empty result for undefined input', () => {
+  it('undefined 输入会返回空结果', () => {
     const r = parseServersBlock(undefined)
     expect(r.servers).toEqual({})
     expect(r.errors).toEqual([])
   })
 
-  it('parses multiple servers and isolates errors', () => {
+  it('可以解析多个服务器并隔离错误', () => {
     const r = parseServersBlock({
       good: { command: 'npx' },
       bad: { timeout: 100 },

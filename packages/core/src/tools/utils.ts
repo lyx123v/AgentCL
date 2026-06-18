@@ -1,32 +1,28 @@
-// @x-code-cli/core — small helpers shared across tool implementations.
+// @x-code-cli/core — 多个工具共用的小型辅助函数
 //
-// Each file in this directory whose name corresponds to a tool (glob.ts,
-// grep.ts, shell.ts, ...) defines exactly one tool. Larger pieces of
-// shared infrastructure get their own named module (progress.ts for the
-// progress reporter registry, shell-provider.ts for cross-platform shell
-// dispatch, truncate.ts for tool-result size limits). This file is for
-// the small leftovers — single-function helpers that more than one tool
-// uses but that don't justify a dedicated module.
+// 这个目录里凡是与某个工具同名的文件（比如 glob.ts、grep.ts、shell.ts）
+// 都只负责定义一个工具。更大的共享基础设施则拆到独立模块，例如：
+// progress.ts 负责进度上报注册表，shell-provider.ts 负责跨平台 shell 分发，
+// truncate.ts 负责工具结果大小限制。这个文件留给那些“多个工具会复用、但又
+// 不值得单独建模块”的小函数。
 //
-// Keep it focused: prefer adding a small helper here over creating a new
-// per-helper file under tools/.
+// 保持聚焦：如果只是很小的共享函数，优先放这里，而不是继续在 tools/ 下
+// 拆出更多碎文件。
 import { createRequire } from 'node:module'
 
-// `@x-code-cli/core` is an ESM package (`"type": "module"`), so the
-// global `require` is not defined at runtime. We need `createRequire` to
-// load CJS-only modules like `@vscode/ripgrep`, which exposes the binary
-// path through `module.exports.rgPath` (no ESM build available).
+// `@x-code-cli/core` 是 ESM 包（`"type": "module"`），运行时没有全局
+// `require`。这里通过 `createRequire` 加载纯 CJS 模块，例如
+// `@vscode/ripgrep`。它只通过 `module.exports.rgPath` 暴露二进制路径，
+// 没有可用的 ESM 版本。
 const _require = createRequire(import.meta.url)
 
-/** Cached path to the ripgrep binary. Resolved lazily on first use,
- *  reused for the rest of the process. */
+/** ripgrep 二进制路径缓存。首次使用时惰性解析，之后整个进程复用。 */
 let _rgPath: string | null = null
 
-/** Resolve the path to the ripgrep binary used by the `glob` and `grep`
- *  tools. Prefers @vscode/ripgrep (which ships a prebuilt binary per
- *  platform) and falls back to `rg` from PATH so dev machines with a
- *  system-wide ripgrep install still work even if the package's
- *  postinstall failed. */
+/** 解析 `glob` 与 `grep` 工具使用的 ripgrep 二进制路径。
+ *  优先使用 @vscode/ripgrep（它会为各平台提供预编译二进制）；
+ *  如果失败，则回退到 PATH 里的 `rg`，这样即使包的 postinstall 失败，
+ *  但开发机装过系统级 ripgrep，也仍然可以正常工作。 */
 export function getRipgrepPath(): string {
   if (_rgPath) return _rgPath
   try {

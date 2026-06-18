@@ -1,21 +1,14 @@
-// @x-code-cli/core — Post-turn memory extractor (silent path).
+// @x-code-cli/core — 回合结束后的记忆提取器（静默路径）
 //
-// Runs as a fire-and-forget pass after each `finishReason === 'stop'` in
-// agentLoop. Sees the recent transcript, decides what (if anything) is
-// durable cross-session knowledge, and writes to AutoMemory directly.
+// 它会在 agentLoop 每次 `finishReason === 'stop'` 后以 fire-and-forget
+// 方式运行，读取最近的对话记录，判断是否有值得跨会话保留的长期知识，
+// 然后直接写入 AutoMemory。
 //
-// The main agent has NO memory-write tool exposed — `saveKnowledge` was
-// removed from the tool registry. Memory writes happen exclusively
-// through this extractor, matching Codex's "main agent is read-only for
-// memory" philosophy. Any visible `● SaveKnowledge` row in the ChatInput
-// frame would feel like the AI doing things behind the user's back right
-// as they're about to type the next prompt.
+// 主 agent 不暴露任何 memory-write 工具，记忆写入只通过这个提取器完成，
+// 保持“主 agent 对记忆只读”的设计约束。
 //
-// Implementation: one `generateText` round-trip with an `output` setting
-// (the v6 replacement for the deprecated `generateObject`). No agentLoop,
-// no turn budget, no tool filter, no sub-callbacks. The model returns a
-// structured object; we iterate the `memories` array and call
-// AutoMemory.add() for each.
+// 实现方式是一轮独立的 `generateText` + `output` 结构化输出调用，
+// 不进入 agentLoop，也没有工具调用和多轮预算。
 import { Output, generateText } from 'ai'
 import type { LanguageModel, ModelMessage } from 'ai'
 
@@ -26,22 +19,16 @@ import type { KnowledgeFact, MemoryWriteNotice } from '../types/index.js'
 import { debugLog } from '../utils.js'
 import type { LoopState } from './loop-state.js'
 
-/** Cap on how many of the most-recent main-loop messages we replay to
- *  the extractor. 12 is enough for a few full "user said X → assistant
- *  did Y → user reacted Z" turns without dragging in stale background. */
+/** 最多回放给提取器的最近主循环消息数。 */
 const MAX_TRANSCRIPT_MESSAGES = 12
 
-/** Skip the extractor entirely if the transcript is too short — nothing
- *  durable in a single greeting + reply. */
+/** 对话太短时直接跳过提取器。 */
 const MIN_TRANSCRIPT_MESSAGES = 4
 
-/** Bound the blast radius if the model gets imaginative. At most this
- *  many writes per pass even on pathological output. */
+/** 单次最多允许写入的记忆条数，避免模型过度发挥。 */
 const MAX_MEMORIES_PER_PASS = 3
 
-/** Serialize concurrent extractor calls. JS is single-threaded so this
- *  is just a re-entrancy guard, not a real lock — keeps two back-to-back
- *  stops from racing on the same transcript. */
+/** 串行化并发提取请求，避免相邻 stop 回合对同一份对话并发提取。 */
 let inflight: Promise<void> = Promise.resolve()
 
 const MemoryItemSchema = z.object({
@@ -52,17 +39,12 @@ const MemoryItemSchema = z.object({
 })
 
 const MemorySchema = z.object({
-  /** Empty array means "nothing to save" — the model's preferred no-op. */
+  /** 空数组表示“无需保存任何内容”，这是模型最推荐的空操作形式。 */
   memories: z.array(MemoryItemSchema).max(MAX_MEMORIES_PER_PASS),
 })
 
-/** Render both AutoMemory scopes as a snapshot the extractor can scan
- *  before deciding whether to write. Without this the model has no idea
- *  what's already saved and routinely produces near-duplicates under
- *  fresh keys (`role` + `user-stack` + `user-profile` for the same
- *  person). The dedup-by-(category, key) check in `AutoMemory.add()`
- *  only catches exact key collisions, not semantic overlap, so the
- *  prevention has to happen in the extractor's prompt. */
+/** 把 user / project 两个 AutoMemory 作用域渲染成文本快照。
+ *  这样提取器在决定是否写入前，能先知道已有记忆，避免生成语义重复项。 */
 function renderExistingMemory(): string {
   const user = getAutoMemory('user').getPromptContent().trim()
   const project = getAutoMemory('project').getPromptContent().trim()
@@ -72,9 +54,8 @@ function renderExistingMemory(): string {
   return sections.join('\n\n')
 }
 
-/** Render the transcript tail as plain text the extractor can read.
- *  Tool-calls and tool-results collapse to bracketed markers — the
- *  extractor only cares about user/assistant intent, not tool details. */
+/** 把最近的消息尾部渲染成提取器可读的纯文本。
+ *  工具调用与工具结果会折叠成标记，因为提取器更关注用户和 assistant 的意图。 */
 function renderTranscript(messages: ModelMessage[]): string {
   const tail = messages.slice(-MAX_TRANSCRIPT_MESSAGES)
   const lines: string[] = []
@@ -184,28 +165,24 @@ ${transcript}
 Output a JSON object matching the schema. Empty \`memories\` array means save nothing — that is the default and often correct. Anything already present in the Existing memory snapshot above is by definition not new — return empty for it unless you are deliberately reusing its exact (category, key) to overwrite with a refined version.`
 
 export interface RunMemoryExtractorArgs {
+  /** 父 agent 的循环状态。 */
   parentState: LoopState
+  /** 父 agent 当前使用的模型实例。 */
   parentModel: LanguageModel
+  /** 可选中断信号。 */
   abortSignal?: AbortSignal
-  /** Fired once per successful AutoMemory write so the UI can surface a
-   *  "Remembered: …" line in scrollback. The extractor is fire-and-forget,
-   *  so this may be invoked after the parent agentLoop has already
-   *  returned — closures must remain valid. */
+  /** 每次成功写入 AutoMemory 后触发一次，供 UI 展示“已记住：...”之类提示。 */
   onWrite?: (notice: MemoryWriteNotice) => void
 }
 
-/** Fire-and-forget memory extraction. Caller should `void runMemoryExtractor(...)`
- *  — awaiting it would block the user from typing the next prompt.
- *
- *  Writes go straight to AutoMemory at file level. There is no
- *  user-facing memory-write tool: the main agent has no way to write
- *  memory itself, so extraction is the sole write path. Silent matches
- *  Codex's "main agent is read-only for memory" convention. */
+/** 以 fire-and-forget 方式启动记忆提取。
+ *  调用方通常应使用 `void runMemoryExtractor(...)`，避免阻塞用户继续输入。 */
 export async function runMemoryExtractor(args: RunMemoryExtractorArgs): Promise<void> {
   inflight = inflight.then(() => doExtract(args)).catch(() => undefined)
   return inflight
 }
 
+/** 执行真正的记忆提取逻辑：回放对话、让模型判断、再写入 AutoMemory。 */
 async function doExtract(args: RunMemoryExtractorArgs): Promise<void> {
   const { parentState, parentModel, abortSignal, onWrite } = args
 
@@ -215,11 +192,8 @@ async function doExtract(args: RunMemoryExtractorArgs): Promise<void> {
   const transcript = renderTranscript(parentState.messages)
   if (!transcript) return
 
-  // Snapshot existing memory so the model can detect semantic overlap with
-  // already-saved facts (the dedup in AutoMemory.add only catches exact
-  // (category, key) collisions). Cost: a few hundred extra prompt tokens
-  // per pass, paid once per turn — much cheaper than letting the file
-  // grow unbounded with `role` + `user-profile` + `user-stack` triples.
+  // 先把已有记忆也喂给模型，让它自行识别语义重叠，避免 AutoMemory 文件
+  // 因重复事实而持续膨胀。
   const existing = renderExistingMemory()
 
   debugLog('memory-extractor.start', `transcript-bytes=${transcript.length} existing-bytes=${existing.length}`)
@@ -247,20 +221,18 @@ async function doExtract(args: RunMemoryExtractorArgs): Promise<void> {
         getAutoMemory(m.scope).add(fact)
         written++
         debugLog('memory-extractor.write', `[${m.scope}/${m.category}] ${m.key}: ${m.fact.slice(0, 100)}`)
-        // Fire the UI notification AFTER the add succeeds. Wrapped in its
-        // own try/catch — a thrown UI callback shouldn't abort remaining
-        // writes in this batch.
+        // 只有真正写入成功后才通知 UI；同时把 UI 回调错误隔离开，
+        // 避免影响后续记忆写入。
         if (onWrite) {
           try {
             onWrite({ scope: m.scope, category: m.category, key: m.key, fact: m.fact })
           } catch {
-            // intentionally swallowed
+            // 故意吞掉，避免 UI 回调反向影响记忆写入流程。
           }
         }
       } catch (err) {
-        // AutoMemory.add wraps the FS write in a queued save; failures
-        // surface here only on validation throws, which shouldn't happen
-        // since zod already validated the category enum.
+        // AutoMemory.add 的文件写入本身已经排队处理；这里通常只会遇到
+        // 额外的校验异常。
         const msg = err instanceof Error ? err.message : String(err)
         debugLog('memory-extractor.write-fail', `${m.key}: ${msg}`)
       }
@@ -274,9 +246,8 @@ async function doExtract(args: RunMemoryExtractorArgs): Promise<void> {
       debugLog('memory-extractor.aborted', 'parent abort')
       return
     }
-    // Catches NoOutputGeneratedError, network errors, schema-mismatch
-    // retries exhausted, etc. The user isn't waiting on this — debugLog
-    // and move on.
+    // 这里统一吞掉生成失败、网络错误、结构化输出校验失败等异常；
+    // 用户不需要等待这个流程完成。
     const msg = err instanceof Error ? err.message : String(err)
     debugLog('memory-extractor.fail', msg)
   }

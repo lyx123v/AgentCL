@@ -6,11 +6,12 @@ import path from 'node:path'
 
 import { readFile } from '../src/tools/read-file.js'
 
+// 执行 readFile 工具，简化各测试中的调用样板。
 const exec = (input: Record<string, unknown>) =>
   readFile.execute!(input as any, { toolCallId: 'test', messages: [], abortSignal: undefined as any })
 
 describe('readFile tool', () => {
-  it('reads a text file with line numbers', async () => {
+  it('会读取文本文件并附带行号', async () => {
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'xc-rf-'))
     const filePath = path.join(tmpDir, 'hello.ts')
     await fs.writeFile(filePath, 'const a = 1\nconst b = 2\nconst c = 3\n')
@@ -23,7 +24,7 @@ describe('readFile tool', () => {
     await fs.rm(tmpDir, { recursive: true })
   })
 
-  it('supports offset and limit', async () => {
+  it('支持 offset 与 limit 参数', async () => {
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'xc-rf-'))
     const filePath = path.join(tmpDir, 'lines.txt')
     const lines = Array.from({ length: 10 }, (_, i) => `line ${i + 1}`)
@@ -38,10 +39,10 @@ describe('readFile tool', () => {
     await fs.rm(tmpDir, { recursive: true })
   })
 
-  it('truncates large files and hints at ranges', async () => {
+  it('会截断大文件，并提示可继续读取的范围', async () => {
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'xc-rf-'))
     const filePath = path.join(tmpDir, 'big.ts')
-    // Threshold is 2000 lines (bumped from 500 to align with Claude Code).
+    // 阈值是 2000 行（从 500 提升而来，以对齐 Claude Code）。
     const lines = Array.from({ length: 2500 }, (_, i) => `// line ${i + 1}`)
     await fs.writeFile(filePath, lines.join('\n'))
 
@@ -53,11 +54,11 @@ describe('readFile tool', () => {
     await fs.rm(tmpDir, { recursive: true })
   })
 
-  it('does NOT head-truncate when offset/limit is specified', async () => {
+  it('当显式指定 offset/limit 时，不会再做默认的头部截断', async () => {
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'xc-rf-'))
     const filePath = path.join(tmpDir, 'big2.ts')
-    // 2500 lines × ~12 bytes/line ≈ 30 KB — well under the 256 KB byte cap,
-    // so the whole requested range comes back without further trimming.
+    // 2500 行 × 每行约 12 字节 ≈ 30 KB，明显低于 256 KB 上限，
+    // 因此整个请求区间都应该原样返回，不再额外裁剪。
     const lines = Array.from({ length: 2500 }, (_, i) => `// line ${i + 1}`)
     await fs.writeFile(filePath, lines.join('\n'))
 
@@ -68,28 +69,27 @@ describe('readFile tool', () => {
     await fs.rm(tmpDir, { recursive: true })
   })
 
-  // Regression: a model that asked for a giant explicit range used to dump
-  // the entire slice into context and blow past the model's context window
-  // on the next turn. Now we hard-cap at MAX_READ_BYTES (256 KB) and tell
-  // the model exactly where to resume.
-  it('caps explicit-range reads at 256 KB and points at the next offset', async () => {
+  // 回归测试：模型如果请求一个巨大的显式范围，过去会把整段内容全塞进上下文，
+  // 导致下一轮直接冲爆上下文窗口。现在我们把显式范围读取硬限制在
+  // MAX_READ_BYTES（256 KB），并明确告诉模型该从哪里继续读。
+  it('会把显式范围读取限制在 256 KB，并指明下一次继续读取的 offset', async () => {
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'xc-rf-'))
     const filePath = path.join(tmpDir, 'huge.txt')
-    // 4000 lines × ~100 bytes/line ≈ 400 KB > 256 KB cap.
+    // 4000 行 × 每行约 100 字节 ≈ 400 KB，已经超过 256 KB 上限。
     const lines = Array.from({ length: 4000 }, (_, i) => `${i + 1}: ${'x'.repeat(95)}`)
     await fs.writeFile(filePath, lines.join('\n'))
 
     const result = (await exec({ filePath, offset: 1, limit: 4000 })) as string
     expect(result).toContain('output capped at 256 KB')
     expect(result).toMatch(/Call readFile again with offset=\d+/)
-    // Sanity: byte cap actually enforced — output well under 300 KB even
-    // with the trailing hint.
+    // 基本 sanity check：字节上限确实生效了，即便加上尾部提示，
+    // 输出也应明显低于 300 KB。
     expect(Buffer.byteLength(result, 'utf-8')).toBeLessThan(300 * 1024)
 
     await fs.rm(tmpDir, { recursive: true })
   })
 
-  it('returns error for non-existent file', async () => {
+  it('遇到不存在的文件时会返回错误', async () => {
     const result = (await exec({ filePath: '/tmp/nonexistent-xc-test-file.ts' })) as string
     expect(result).toContain('Error')
   })

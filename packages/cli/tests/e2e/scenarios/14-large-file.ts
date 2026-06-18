@@ -3,6 +3,7 @@ import type { Scenario } from '../framework/types.js'
 const scenario: Scenario = {
   id: '14-large-file',
   name: '大文件 readFile：head 截断后模型按 hint 二次调用拉尾部',
+  // 执行大文件读取场景：构造超大文件，并验证模型会按提示再次读取尾部内容。
   async run(ctx) {
     // 生成 5000 行文件，远超 LARGE_FILE_LINE_THRESHOLD=2000。
     // readFile 默认只返回 head（前 2000 行），随后给出一条 hint：
@@ -19,11 +20,9 @@ const scenario: Scenario = {
     await ctx.writeFile('big.txt', lines.join('\n'))
 
     const r = await ctx.runCli(
-      'Use the readFile tool to read big.txt. Because the file is large, the first call will ' +
-        'truncate and the tool result will tell you so. When that happens you MUST call readFile ' +
-        'again with offset/limit to fetch the very last line of the file — do not guess, do not ' +
-        'extrapolate from the pattern of earlier lines. Then quote the very last line of the file ' +
-        'verbatim in your final answer.',
+      '请使用 readFile 工具读取 big.txt。由于文件很大，第一次调用会被截断，工具结果也会明确告诉你。' +
+        '出现这种情况后，你必须再次调用 readFile，并通过 offset/limit 读取文件的最后一行。' +
+        '不要猜测，也不要根据前面行的模式去外推。最后请在最终回答里逐字引用该文件的最后一行。',
       { args: ['--max-turns', '6'] },
     )
     ctx.expect.exitCode(r, 0)
@@ -39,7 +38,7 @@ const scenario: Scenario = {
     const hasOffsetCall = readCalls.some((tc) => tc.input.offset != null)
     ctx.expect.truthy(
       hasOffsetCall,
-      `expected at least one readFile call with offset set; got inputs: ${readCalls.map((c) => JSON.stringify(c.input)).join(', ')}`,
+      `期望至少有一次 readFile 调用设置了 offset；实际输入为：${readCalls.map((c) => JSON.stringify(c.input)).join(', ')}`,
     )
     ctx.expect.noToolErrors(r)
     // 核心：尾部 token 只能从二次读拿到，凭模式外推拼不出。
@@ -47,7 +46,7 @@ const scenario: Scenario = {
     // 顺手守住：loop 没冒出 orphan tool_call 报错
     ctx.expect.truthy(
       !r.stderr.toLowerCase().includes('tool_use without tool_result'),
-      'stderr contained orphan tool_call complaint: ' + r.stderr.slice(0, 300),
+      'stderr 中出现了孤立 tool_call 的报错：' + r.stderr.slice(0, 300),
     )
   },
 }

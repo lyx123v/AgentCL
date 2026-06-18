@@ -1,21 +1,21 @@
-// @x-code-cli/core — askUser tool (interactive question, no execute — handled via callback)
+// @x-code-cli/core — askUser 工具（交互式提问，不提供 execute，由回调处理）
 import { tool } from 'ai'
 
 import { z } from 'zod'
 
 export const askUser = tool({
-  description: `Ask the user multiple-choice questions to gather information, clarify ambiguity, understand preferences, make decisions, or offer choices.
+  description: `向用户提出多项选择题，用于收集信息、澄清歧义、了解偏好、协助决策或提供选项。
 
-Usage notes:
-- Users will always be able to select "Other" to provide custom text input.
-- If you recommend a specific option, make that the first option in the list and add "(Recommended)" at the end of the label.
+使用说明：
+- 用户始终可以选择“其他”来自定义输入文本。
+- 如果你推荐某个选项，请把它放在列表第一项，并在标签末尾添加“(推荐)”。
 
-Plan mode note: In plan mode, use this tool to clarify requirements or choose between approaches BEFORE finalizing your plan. Do NOT use this tool to ask "Is my plan ready?" or "Should I proceed?" — use exitPlanMode for plan approval. IMPORTANT: Do not reference "the plan" in your questions (e.g., "Do you have feedback about the plan?", "Does the plan look good?") because the user cannot see the plan in the UI until you call exitPlanMode. If you need plan approval, use exitPlanMode instead.`,
+计划模式说明：在计划模式下，应当在最终定稿前使用此工具澄清需求或在方案之间做选择。不要用它来问“我的计划可以了吗？”或“要继续吗？”这类审批问题；计划审批应使用 `exitPlanMode`。重要：提问时不要直接提到“计划”（例如“你对这个计划有什么反馈？”、“这个计划看起来可以吗？”），因为在你调用 `exitPlanMode` 之前，用户在界面里看不到计划内容。如果你需要计划审批，请改用 `exitPlanMode`。`,
   inputSchema: z.object({
     question: z
       .string()
       .describe(
-        'The complete question to ask the user. Should be clear, specific, and end with a question mark. Keep it to ONE short sentence — do NOT embed long markdown, lists, headings, or detailed explanations here; put tradeoff details in option descriptions instead. Example: "Which library should we use for date formatting?"',
+        '要向用户提出的完整问题。应清晰、具体，并以问号结尾。请保持为一句简短的话，不要在这里嵌入长篇 Markdown、列表、标题或详细说明；取舍细节应写在选项描述中。例如：“日期格式化要使用哪个库？”',
       ),
     options: z
       .array(
@@ -23,20 +23,20 @@ Plan mode note: In plan mode, use this tool to clarify requirements or choose be
           label: z
             .string()
             .describe(
-              'The display text for this option that the user will see and select. Should be concise (1-5 words) and clearly describe the choice.',
+              '用户会看到并可直接选择的选项文本。应简洁（1-5 个词）并清晰表达该选项含义。',
             ),
           description: z
             .string()
             .describe(
-              'Explanation of what this option means or what will happen if chosen. Useful for providing context about tradeoffs or implications.',
+              '说明这个选项代表什么，或用户选中后会发生什么。适合用来补充取舍和影响背景。',
             ),
         }),
       )
       .min(2)
       .max(4)
       .describe(
-        'The available choices for this question. Must have 2-4 options. Each option should be a distinct, mutually exclusive choice. There should be no "Other" option — the UI auto-appends one as the last row, so adding your own creates a duplicate.',
+        '这个问题可供用户选择的选项。必须提供 2-4 个选项，并且每个选项都应当是清晰且互斥的选择。不要手动添加“其他”选项，界面会自动在最后补上一项，自己再加会导致重复。',
       ),
   }),
-  // No execute — handled through callback to trigger UI rendering
+  // 不提供 execute，由外层回调处理以触发界面渲染
 })

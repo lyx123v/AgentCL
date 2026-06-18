@@ -1,8 +1,8 @@
-// @x-code-cli/core — Plugin contributions → existing loaders integration
+// @x-code-cli/core — 插件贡献与现有加载器的整合层
 //
-// Takes the output of [[loader]].loadAllPlugins and converts it into the
-// shapes that the pre-existing skill / sub-agent / MCP loaders consume,
-// so a CLI startup call sequence looks like:
+// 它接收 [[loader]].loadAllPlugins 的结果，并把插件贡献转换成现有
+// skill / sub-agent / MCP 加载器能够直接消费的结构，因此 CLI 启动阶段
+// 会形成这样的调用链：
 //
 //   const pluginLoad = await loadAllPlugins({ cwd })
 //   const integration = await buildPluginIntegration(pluginLoad)
@@ -10,28 +10,24 @@
 //   const agentRegistry  = await createSubAgentRegistry({ extraDirs: integration.agentsDirs })
 //   const mcpRegistry    = await loadMcpFromDisk({ ..., extraServers: integration.mcpServers })
 //
-// Three concerns this module owns and the others don't:
+// 这个模块负责另外几个加载器不负责的三件事：
 //
-//   1. Resolving plugin `mcpServers` from the manifest (a path or an
-//      inline object) into a typed `Record<string, McpServerConfig>`.
-//      The path form is a JSON file shaped `{ mcpServers: {...} }`
-//      (same as ~/.x-code/config.json). The inline form is the raw
-//      record itself.
+//   1. 把插件 manifest 中的 `mcpServers`（可能是路径，也可能是内联对象）
+//      解析成带类型的 `Record<string, McpServerConfig>`。
+//      路径形式对应一个 `{ mcpServers: {...} }` 结构的 JSON 文件，
+//      与 ~/.x-code/config.json 保持一致；内联形式则直接使用对象本身。
 //
-//   2. Detecting name collisions across plugins. We deduplicate by
-//      server name — first plugin in iteration order wins, the second's
-//      entry is dropped with a warning. A future improvement: namespace
-//      server names with the plugin id.
+//   2. 检测插件之间的名称冲突。当前按服务名去重：遍历顺序里靠前的插件获胜，
+//      后出现的同名项会被丢弃并记录告警。未来可以考虑给服务名加上
+//      插件 id 命名空间。
 //
-//   3. Logging plugin contributions we don't (yet) support: `commands`
-//      (we lack a file-based slash command loader) and `hooks` (Task 9
-//      will add the hook subsystem; until then, declared hooks are
-//      noted but not executed).
+//   3. 记录那些我们暂时还不支持完整消费的插件贡献。比如 `commands`
+//      和 `hooks`，虽然当前系统已经能识别并登记它们，但某些能力的最终
+//      消费时机仍由别处决定，因此这里需要集中沉淀诊断信息。
 //
-// Plugin order is deterministic — driven by the iteration order of
-// `loadAllPlugins`'s `contributions` Map, which itself reflects the
-// order of installed_plugins.json + project-local discovery. Stable
-// across boots when the same plugins are installed.
+// 插件遍历顺序是确定性的，由 `loadAllPlugins` 返回的 `contributions` Map
+// 迭代顺序驱动，而后者又反映 installed_plugins.json 与项目本地发现顺序。
+// 因此在安装集不变的前提下，多次启动结果稳定一致。
 import fs from 'node:fs/promises'
 
 import { HookBus } from '../hooks/bus.js'
@@ -48,43 +44,42 @@ import type { InlineMcpServers, LoadedPlugin } from './types.js'
 import { getPluginUserConfigEnv } from './user-config.js'
 
 export interface PluginIntegrationOutput {
-  /** Extra skill directories the skill loader should scan, with the
-   *  owning plugin id stamped on each. Only enabled plugins included. */
+  /** 需要额外纳入 skill 加载器扫描的目录列表，并附带所属插件 id。
+   *  仅包含已启用插件。 */
   skillsDirs: Array<{ dir: string; pluginId: string }>
-  /** Same as above for sub-agent .md files. */
+  /** 需要额外扫描的 sub-agent `.md` 目录列表。 */
   agentsDirs: Array<{ dir: string; pluginId: string }>
-  /** Same as above for slash command `*.md` files. Each entry carries
-   *  the owning plugin's rootDir so the command body can substitute
-   *  `${CLAUDE_PLUGIN_ROOT}` at activation time. */
+  /** 需要额外扫描的 slash command `*.md` 目录列表。
+   *  每项都携带所属插件 rootDir，方便命令体在激活时替换
+   *  `${CLAUDE_PLUGIN_ROOT}`。 */
   commandsDirs: Array<{ dir: string; pluginId: string; pluginRoot: string }>
-  /** Merged `mcpServers` block from every enabled plugin. Name
-   *  collisions resolved first-wins; the losers are recorded in
-   *  `mcpCollisions`. */
+  /** 所有已启用插件合并后的 `mcpServers` 配置。
+   *  名称冲突采用“先到先得”，被丢弃者记录到 `mcpCollisions`。 */
   mcpServers: Record<string, McpServerConfig>
-  /** Hook registry built from every enabled plugin's `hooks` config.
-   *  Empty when no plugin declared any hooks. Hand this to
-   *  `new HookBus(...)` to wire the agent loop's emit-sites. */
+  /** 基于所有已启用插件 `hooks` 配置构建出的 HookRegistry。
+   *  若没有插件声明 hooks，则为空注册表。可直接交给
+   *  `new HookBus(...)` 接入 agent loop 的事件发射点。 */
   hookRegistry: HookRegistry
-  /** Ready-to-use bus over `hookRegistry`. Convenience for the CLI
-   *  startup wiring — `AgentOptions.hookBus = integration.hookBus`. */
+  /** 基于 `hookRegistry` 构建好的可直接使用的 HookBus。
+   *  方便 CLI 启动时直接赋值：`AgentOptions.hookBus = integration.hookBus`。 */
   hookBus: HookBus
-  /** Per-plugin summary of which event names had hooks — used by
-   *  `/plugin doctor` and `/plugin info` UI. */
+  /** 每个插件声明了哪些 hook 事件的摘要信息。
+   *  供 `/plugin doctor` 和 `/plugin info` 界面使用。 */
   pluginHooks: Array<{ pluginId: string; events: string[] }>
-  /** mcpServers entries dropped due to name collision with an earlier
-   *  plugin. `{ name, droppedFrom, keptFrom }`. */
+  /** 因与更早插件发生同名冲突而被丢弃的 mcpServers 条目。
+   *  结构为 `{ name, droppedFrom, keptFrom }`。 */
   mcpCollisions: Array<{ name: string; droppedFrom: string; keptFrom: string }>
-  /** mcpServers parse / read errors per plugin — these don't block
-   *  startup, they surface in `/plugin doctor`. */
+  /** 各插件在 mcpServers 读取或解析阶段产生的错误。
+   *  这类错误不会阻塞启动，而是交由 `/plugin doctor` 展示。 */
   mcpErrors: Array<{ pluginId: string; message: string }>
-  /** Hooks parse / read errors per plugin. */
+  /** 各插件在 hooks 读取或解析阶段产生的错误。 */
   hookErrors: Array<{ pluginId: string; message: string }>
 }
 
+/** 基于已加载插件结果，构建各子系统可直接消费的整合输出。 */
 export async function buildPluginIntegration(load: LoadResult): Promise<PluginIntegrationOutput> {
-  // Hook registry is built last so we can collect the per-plugin configs
-  // along the way (we don't know all plugins' rootDirs in advance — they
-  // come from LoadedPlugin).
+  // Hook registry 放到最后统一构建，这样我们可以先沿途收集每个插件的
+  // hooks 配置。毕竟插件 rootDir 只有在拿到 LoadedPlugin 后才知道。
   const hookInputs: Array<{ pluginId: string; pluginDir: string; config: HookConfig }> = []
 
   const out: PluginIntegrationOutput = {
@@ -138,6 +133,7 @@ export async function buildPluginIntegration(load: LoadResult): Promise<PluginIn
   return out
 }
 
+/** 解析单个插件的 hooks 贡献，并把非致命错误写入整合输出。 */
 async function resolvePluginHooks(
   plugin: LoadedPlugin,
   contrib: NonNullable<ResolvedContributions['hooks']>,
@@ -153,7 +149,7 @@ async function resolvePluginHooks(
     } catch (err) {
       out.hookErrors.push({
         pluginId: plugin.id,
-        message: `failed to read hooks file ${contrib.path}: ${err instanceof Error ? err.message : String(err)}`,
+        message: `读取 hooks 文件失败 ${contrib.path}：${err instanceof Error ? err.message : String(err)}`,
       })
       return null
     }
@@ -169,18 +165,17 @@ async function resolvePluginHooks(
   }
 }
 
-/** Extract the `name → cfg` block from the contents of a `.mcp.json`
- *  file. Two shapes are accepted:
+/** 从 `.mcp.json` 文件内容中提取 `name -> cfg` 这一层配置块。
+ *  支持两种形状：
  *
- *    - Wrapped:  `{ "mcpServers": { "name": cfg, ... } }`
- *    - Flat:     `{ "name": cfg, ... }`  (no wrapper key)
+ *    - 包装形式：`{ "mcpServers": { "name": cfg, ... } }`
+ *    - 扁平形式：`{ "name": cfg, ... }`（没有包装键）
  *
- *  Claude Code's official plugins (e.g. linear@anthropic-marketplace)
- *  ship the flat form; the wrapped form matches our own config.json
- *  layout. The detection rule is: if the parsed object has a
- *  `mcpServers` key at all, treat it as wrapped (and pass through the
- *  value as-is so the schema parser produces a clean error on
- *  misshape). Otherwise treat the whole object as the flat block. */
+ *  Claude Code 官方插件（例如 linear@anthropic-marketplace）
+ *  常使用扁平形式；而包装形式与我们自己的 config.json 布局一致。
+ *  识别规则是：只要解析后的对象里存在 `mcpServers` 这个键，就视为包装形式，
+ *  并把对应值原样交给 schema 解析器，这样一旦结构错误也能得到清晰报错；
+ *  否则就把整个对象当成扁平配置块。 */
 export function extractMcpServersBlock(parsed: unknown): unknown {
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
   const obj = parsed as Record<string, unknown>
@@ -188,6 +183,7 @@ export function extractMcpServersBlock(parsed: unknown): unknown {
   return obj
 }
 
+/** 解析单个插件的 mcpServers 贡献，并完成 userConfig 环境变量注入。 */
 async function resolvePluginMcpServers(
   plugin: LoadedPlugin,
   contrib: NonNullable<ResolvedContributions['mcpServers']>,
@@ -204,7 +200,7 @@ async function resolvePluginMcpServers(
     } catch (err) {
       out.mcpErrors.push({
         pluginId: plugin.id,
-        message: `failed to read mcpServers file ${contrib.path}: ${err instanceof Error ? err.message : String(err)}`,
+        message: `读取 mcpServers 文件失败 ${contrib.path}：${err instanceof Error ? err.message : String(err)}`,
       })
       return {}
     }
@@ -215,72 +211,70 @@ async function resolvePluginMcpServers(
     out.mcpErrors.push({ pluginId: plugin.id, message: `mcpServers.${e.name}: ${e.message}` })
   }
 
-  // Merge the owning plugin's userConfig values into each server's env
-  // map. Authors who want an API key from a userConfig field declared
-  // in the manifest just reference it as a normal env var inside the
-  // mcpServers entry (or skip the explicit reference and rely on the
-  // child process's inherited env). Pre-existing server env entries win
-  // so an author can override a userConfig value per-server if needed.
+  // 把所属插件的 userConfig 值合并进每个服务的 env 映射。
+  // 如果插件作者希望把 manifest 里声明的 userConfig 字段（例如 API Key）
+  // 暴露给 MCP 进程，只需要像普通环境变量一样在 mcpServers 中引用它，
+  // 或者干脆依赖子进程继承环境即可。已有的 server env 优先级更高，
+  // 这样作者仍可按服务粒度覆盖某个 userConfig 值。
   try {
     const pluginEnv = await getPluginUserConfigEnv(plugin.id)
     if (Object.keys(pluginEnv).length > 0) {
       for (const name of Object.keys(servers)) {
         const cfg = servers[name]!
-        // Only stdio servers spawn a child process and accept env vars —
-        // HTTP servers are remote endpoints, env merging is meaningless.
+        // 只有 stdio 类型服务会拉起子进程并接受 env；
+        // HTTP 服务是远端端点，合并环境变量没有意义。
         if (isStdioConfig(cfg)) {
           servers[name] = { ...cfg, env: { ...pluginEnv, ...(cfg.env ?? {}) } }
         }
       }
     }
   } catch (err) {
-    out.mcpErrors.push({ pluginId: plugin.id, message: `userConfig env merge: ${String(err)}` })
+    out.mcpErrors.push({ pluginId: plugin.id, message: `合并 userConfig 环境变量失败：${String(err)}` })
   }
 
   return servers
 }
 
-/** Convenience: log non-fatal integration diagnostics to debug.log so
- *  `/plugin doctor` and ad-hoc support can find them. CLI startup calls
- *  this after `buildPluginIntegration` returns. */
+/** 便捷方法：把非致命整合诊断信息写入 debug.log。
+ *  这样 `/plugin doctor` 或临时排障时都能更方便地定位问题。
+ *  CLI 启动流程会在 `buildPluginIntegration` 返回后调用它。 */
 export function debugLogIntegrationDiagnostics(integration: PluginIntegrationOutput): void {
   for (const c of integration.commandsDirs) {
-    debugLog('plugins.commands-loaded', `${c.pluginId} commands dir: ${c.dir}`)
+    debugLog('plugins.commands-loaded', `${c.pluginId} commands 目录：${c.dir}`)
   }
   for (const h of integration.pluginHooks) {
-    debugLog('plugins.hooks-registered', `${h.pluginId} hooks: [${h.events.join(', ')}]`)
+    debugLog('plugins.hooks-registered', `${h.pluginId} hooks：[${h.events.join(', ')}]`)
   }
   for (const e of integration.hookErrors) {
     debugLog('plugins.hook-error', `${e.pluginId}: ${e.message}`)
   }
   for (const c of integration.mcpCollisions) {
-    debugLog('plugins.mcp-collision', `mcpServer "${c.name}" from ${c.droppedFrom} dropped (kept ${c.keptFrom})`)
+    debugLog('plugins.mcp-collision', `来自 ${c.droppedFrom} 的 mcpServer "${c.name}" 已丢弃（保留 ${c.keptFrom}）`)
   }
   for (const e of integration.mcpErrors) {
     debugLog('plugins.mcp-error', `${e.pluginId}: ${e.message}`)
   }
 }
 
-/** Re-scan plugins from disk and return just the merged plugin-contributed
- *  mcpServers block. Used by `/mcp refresh` to include plugin servers in
- *  the merged map (so they aren't silently dropped on standalone MCP
- *  refresh) and by `/plugin refresh` indirectly via buildPluginIntegration.
+/** 重新从磁盘扫描插件，并只返回插件贡献出来的合并后 mcpServers。
+ *  `/mcp refresh` 会用它把插件服务重新并入总配置，避免独立刷新 MCP 时
+ *  把插件服务静默丢掉；`/plugin refresh` 也会通过 buildPluginIntegration
+ *  间接依赖它。
  *
- *  Returns `{}` (not undefined) so callers can spread it unconditionally.
- *  Scan failures degrade to `{}` + debug log — callers shouldn't have an
- *  MCP-only refresh fail because of a plugin-system hiccup. */
+ *  这里固定返回 `{}` 而不是 `undefined`，这样调用方可以放心直接展开。
+ *  如果扫描失败，则降级为 `{}` 并写 debug log，避免一次纯 MCP 刷新因为
+ *  插件系统的小故障而整体失败。 */
 export async function getPluginMcpServersFromDisk(cwd: string): Promise<Record<string, McpServerConfig>> {
   try {
     const load = await loadAllPlugins({ cwd })
     const integration = await buildPluginIntegration(load)
     return integration.mcpServers
   } catch (err) {
-    debugLog('plugins.mcp-scan-failed', `getPluginMcpServersFromDisk: ${String(err)}`)
+    debugLog('plugins.mcp-scan-failed', `getPluginMcpServersFromDisk 失败：${String(err)}`)
     return {}
   }
 }
 
-// Re-export commonly used pieces so a single import from this module is
-// enough for typical CLI startup wiring.
+// 重新导出常用类型与方法，让典型的 CLI 启动接线只需从这里单点导入。
 export type { LoadResult, ResolvedContributions } from './loader.js'
 export { loadAllPlugins }

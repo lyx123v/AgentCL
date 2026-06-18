@@ -1,22 +1,22 @@
-// @x-code-cli/core — Per-session JSONL transcript store.
+// @x-code-cli/core — 按会话存储的 JSONL 对话记录
 //
-// One file per session: `.x-code/sessions/<slug>-<sessionId>.jsonl` (slug is
-// the same human-readable token used by plan files; falls back to
-// timestamp-only naming when the user's first message has no ASCII content).
-// The file is append-only; everything we record about a session — header,
-// each ModelMessage, periodic token-usage snapshots, compaction boundaries,
-// abort markers — lives as one JSON object per line.
+// 每个 session 对应一个文件：`.x-code/sessions/<slug>-<sessionId>.jsonl`。
+// 其中 slug 与 plan 文件使用相同的人类可读标识；如果用户首条消息不含 ASCII，
+// 就会退化为仅时间戳命名。
+// 文件采用只追加模式；一个 session 中我们记录的所有内容——header、
+// 每条 ModelMessage、周期性的 token 用量快照、压缩边界、打断标记——
+// 都以“每行一个 JSON 对象”的形式落盘。
 //
-// Why JSONL and not a single rewritten JSON document:
-//   - Crash-safe. A killed process or full-disk error at most loses the line
-//     currently being written; everything before it is intact.
-//   - Cheap appends. Each turn appends a few hundred bytes; never rewrites.
-//   - Mirrors Claude Code's `~/.claude/<project>/<uuid>.jsonl` exactly,
-//     including the `compact_boundary` semantics (see `loadSession` below).
+// 之所以用 JSONL，而不是反复重写单个大 JSON 文档：
+//   - 更抗崩溃。进程被杀或磁盘写满时，最多损失当前正在写的那一行，
+//     之前内容仍然完好。
+//   - 追加成本低。每个 turn 只追加几百字节，不需要整文件重写。
+//   - 与 Claude Code 的 `~/.claude/<project>/<uuid>.jsonl` 形态完全对齐，
+//     包括 `compact_boundary` 的语义（见下方 `loadSession`）。
 //
-// This module replaces the old per-session `<id>.usage.json` and
-// `<id>.json` (LLM summary) files — both are now meta entries inside the
-// jsonl. /usage history and /resume both source from the same file.
+// 这个模块取代了旧的按会话存储 `<id>.usage.json` 和 `<id>.json`
+// （LLM summary）文件；它们现在都变成 jsonl 里的 meta 记录。
+// `/usage` 历史与 `/resume` 都读取同一份文件。
 import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import fs from 'node:fs/promises'
@@ -32,14 +32,15 @@ import type { CheckpointEntry } from './snapshot.js'
 
 const SESSIONS_SUBDIR = 'sessions'
 
+/** 计算会话目录路径。 */
 function sessionsDir(cwd: string = process.cwd()): string {
   return path.join(cwd, XCODE_DIR, SESSIONS_SUBDIR)
 }
 
-/** Build the on-disk filename for a session. Same shape as plan files
- *  (`<slug>-<id>.<ext>`) so `ls .x-code/sessions/` and `ls .x-code/plans/`
- *  scan the same way. Empty slug (CJK-only first message) collapses to
- *  pure-timestamp naming, matching the plan-file fallback. */
+/** 计算某个 session 在磁盘上的文件路径。命名形态与 plan 文件一致，
+ *  即 `<slug>-<id>.<ext>`，这样 `ls .x-code/sessions/` 和
+ *  `ls .x-code/plans/` 的观感保持统一。空 slug（例如首条消息全是 CJK）
+ *  会退化为纯时间戳命名，与 plan 文件的兜底策略一致。 */
 export function getSessionFilePath(
   state: { sessionId: string; taskSlug: string },
   cwd: string = process.cwd(),
@@ -48,78 +49,106 @@ export function getSessionFilePath(
   return path.join(sessionsDir(cwd), `${base}.jsonl`)
 }
 
-// ── Entry types written to the jsonl ────────────────────────────────────
+// ── 写入 jsonl 的记录类型 ───────────────────────────────────────────
 
 interface HeaderEntry {
+  /** 固定为 meta，表示这是元数据行。 */
   t: 'meta'
+  /** 元数据子类型，这里是 header。 */
   kind: 'header'
+  /** 会话当时的工作目录。 */
   cwd: string
+  /** 会话开始时的 git 分支名。 */
   gitBranch?: string
+  /** 会话使用的模型 id。 */
   modelId: string
+  /** 会话启动时间。 */
   startedAt: string
-  /** Truncated to ~500 chars — enough for the picker to show a recognisable
-   *  preview without paying to read the whole first user message off disk. */
+  /** 截断到约 500 个字符，让选择器能展示足够可辨识的预览，
+   *  同时避免为此把首条用户消息完整读回内存。 */
   firstPrompt: string
+  /** 人类可读的任务 slug。 */
   taskSlug: string
+  /** session 唯一标识。 */
   sessionId: string
 }
 
 interface MsgEntry {
+  /** 固定为 msg，表示这是一条消息记录。 */
   t: 'msg'
+  /** 真正的模型消息内容。 */
   message: ModelMessage
+  /** 记录写入时间。 */
   ts: string
 }
 
 interface UsageEntry {
+  /** 固定为 meta，表示这是元数据行。 */
   t: 'meta'
+  /** 元数据子类型，这里是 usage。 */
   kind: 'usage'
+  /** 当时累计的 token 使用统计。 */
   usage: TokenUsage
+  /** 产生这份统计时对应的模型 id。 */
   modelId: string
+  /** 快照时间。 */
   ts: string
 }
 
 interface CompactBoundaryEntry {
+  /** 固定为 meta，表示这是元数据行。 */
   t: 'meta'
+  /** 元数据子类型，这里是 compact-boundary。 */
   kind: 'compact-boundary'
-  /** Present for deep (LLM-summary) compaction; omitted for light compaction
-   *  (loop-guard pruning). The summary text is ALSO embedded in the next
-   *  msg line that gets re-flushed, so this is informational — used by
-   *  `listSessions` to show "compacted" hints in the picker without
-   *  re-reading the post-boundary messages. */
+  /** 深压缩（LLM summary）时会写入；轻压缩（loop-guard 裁剪）时省略。
+   *  summary 文本也会嵌入到后续重新刷写的下一条 msg 记录中，
+   *  因此这里主要是信息性字段，方便 `listSessions` 在不重新读取
+   *  边界后消息内容的前提下，于选择器里展示“已压缩”的提示。 */
   summary?: string
+  /** 写入时间。 */
   ts: string
 }
 
 interface InterruptedEntry {
+  /** 固定为 meta，表示这是元数据行。 */
   t: 'meta'
+  /** 元数据子类型，这里是 interrupted。 */
   kind: 'interrupted'
+  /** 中断标记写入时间。 */
   ts: string
 }
 
-/** Rewind checkpoint pointer. Surfaced by `loadSession` so /resume picks
- *  up the same /rewind history. The actual file backups live separately
- *  under `.x-code/file-history/<sessionId>/`. */
+/** rewind 检查点指针。`loadSession` 会把它读出来，这样 `/resume`
+ *  后仍能保留同一份 `/rewind` 历史。真正的文件备份内容单独存放在
+ *  `.x-code/file-history/<sessionId>/` 下面。 */
 interface CheckpointJsonlEntry {
+  /** 固定为 meta，表示这是元数据行。 */
   t: 'meta'
+  /** 元数据子类型，这里是 checkpoint。 */
   kind: 'checkpoint'
+  /** checkpoint 唯一标识。 */
   ckptId: string
+  /** 创建检查点时对应的消息数量。 */
   messageCount: number
+  /** 检查点时间戳。 */
   ts: string
+  /** 触发该检查点的用户消息预览。 */
   userPrompt: string
 }
 
 type Entry = HeaderEntry | MsgEntry | UsageEntry | CompactBoundaryEntry | InterruptedEntry | CheckpointJsonlEntry
 
-// ── Append helpers (fire-and-forget; never throw) ───────────────────────
+// ── 追加写辅助函数（尽力而为，不向外抛错）─────────────────────────
 
+/** 向 jsonl 文件追加一条结构化记录。 */
 async function appendLine(filePath: string, entry: Entry): Promise<void> {
   await appendRawLines(filePath, [JSON.stringify(entry)])
 }
 
-/** Batch-append pre-serialised jsonl rows. Returns true on success so
- *  callers can keep "only advance state when disk write succeeded" — e.g.
- *  markBoundaryAndReflush mustn't clear the in-memory checkpoint list
- *  unless the boundary actually landed on disk. */
+/** 批量追加已经序列化好的 jsonl 行。返回值表示是否写入成功，
+ *  这样调用方就能遵守“只有磁盘写成功才推进内存状态”的原则；
+ *  例如 `markBoundaryAndReflush` 只有在 boundary 真正落盘后，
+ *  才应该清空内存中的 checkpoint 列表。 */
 async function appendRawLines(filePath: string, lines: string[]): Promise<boolean> {
   if (lines.length === 0) return true
   try {
@@ -127,14 +156,14 @@ async function appendRawLines(filePath: string, lines: string[]): Promise<boolea
     await fs.appendFile(filePath, lines.join('\n') + '\n', 'utf-8')
     return true
   } catch {
-    // Persistence is best-effort — never block the agent loop on FS errors.
+    // 持久化是尽力而为的，不能因为文件系统异常阻塞 agent loop。
     return false
   }
 }
 
-/** Try to read the current git branch from `.git/HEAD`. Cheap, fully sync
- *  on the calling promise; absent / detached-HEAD / non-git all map to
- *  undefined silently. */
+/** 尝试从 `.git/HEAD` 读取当前分支名。这个操作很轻量；
+ *  如果目录不是 git 仓库、处于 detached HEAD，或文件不存在，
+ *  都会静默返回 undefined。 */
 async function readGitBranch(cwd: string): Promise<string | undefined> {
   try {
     const head = await readFile(path.join(cwd, '.git', 'HEAD'), 'utf-8')
@@ -145,9 +174,9 @@ async function readGitBranch(cwd: string): Promise<string | undefined> {
   }
 }
 
-/** Write the session header. Idempotent: if the file already exists (resume
- *  path), we skip — the original header is preserved so picker metadata
- *  stays stable across resumes. */
+/** 写入 session header。该操作是幂等的：如果文件已经存在
+ *  （通常是 resume 场景），就直接跳过，保留原始 header，
+ *  让选择器读取到的元信息在多次恢复后仍然稳定。 */
 export async function appendHeader(
   state: LoopState,
   modelId: string,
@@ -157,9 +186,9 @@ export async function appendHeader(
   const filePath = getSessionFilePath(state, cwd)
   try {
     await fs.access(filePath)
-    return // file already exists — header preserved from original session
+    return // 文件已存在，保留原始 header
   } catch {
-    // File doesn't exist — fall through and write the header.
+    // 文件不存在，继续往下写入 header。
   }
   const gitBranch = await readGitBranch(cwd)
   const entry: HeaderEntry = {
@@ -176,17 +205,16 @@ export async function appendHeader(
   await appendLine(filePath, entry)
 }
 
-/** Flush every message in `state.messages` past `state.persistedMessageCount`
- *  to the jsonl file. The diff-based design keeps the writer decoupled from
- *  the many places in the agent loop that mutate state.messages directly
- *  (collectTurnResponse, processToolCalls, length-finish nudge, etc.) — we
- *  catch them all by sweeping at turn boundaries.
+/** 将 `state.messages` 中 `state.persistedMessageCount` 之后的新消息
+ *  批量刷入 jsonl 文件。这里采用差量刷写设计，是为了让写入逻辑与 agent loop
+ *  中那些会直接修改 `state.messages` 的位置保持解耦
+ *  （如 collectTurnResponse、processToolCalls、length-finish nudge 等）；
+ *  统一在 turn 边界做一次 sweep，就能兜住所有变更来源。
  *
- *  After deep / light compaction the in-memory array shrinks. Callers must
- *  call `markBoundaryAndReflush` (below) instead of this — that path writes
- *  a compact-boundary marker so the loader can correctly truncate-on-load
- *  and then re-appends the trimmed messages so post-boundary jsonl content
- *  matches the new in-memory state. */
+ *  发生深压缩或轻压缩后，内存数组会缩短。这时调用方必须改用下面的
+ *  `markBoundaryAndReflush`，因为那条路径会先写 compact-boundary，
+ *  让 loader 在加载时知道该从何处截断，然后再把裁剪后的消息重新追加，
+ *  保证边界后的 jsonl 内容与当前内存状态完全一致。 */
 export async function flushPendingMessages(state: LoopState): Promise<void> {
   if (state.persistedMessageCount >= state.messages.length) return
   const filePath = getSessionFilePath(state)
@@ -198,20 +226,19 @@ export async function flushPendingMessages(state: LoopState): Promise<void> {
     const entry: MsgEntry = { t: 'msg', message, ts }
     lines.push(JSON.stringify(entry))
   }
-  // Preserve the pre-refactor early-bail: when the loop produces nothing
-  // (every unpersisted slot was a defensive `!message` skip), leave
-  // persistedMessageCount alone so a future repeat-with-real-messages
-  // doesn't think it already covered the range.
+  // 保留重构前的提前返回语义：如果这次 loop 实际没有产出任何可写消息
+  // （所有未持久化槽位都因为防御性的 `!message` 被跳过），就不要推进
+  // persistedMessageCount，避免未来真正有消息时误以为这段区间已刷盘。
   if (lines.length === 0) return
   if (await appendRawLines(filePath, lines)) {
     state.persistedMessageCount = state.messages.length
   }
 }
 
-/** Append a usage snapshot for the current turn. Called from the agent loop
- *  after `collectTurnResponse` accepts the provider's `usage` object. The
- *  picker reads only the LAST usage line (tail scan) to display per-session
- *  totals — no need to keep older snapshots around any more efficiently. */
+/** 为当前 turn 追加一条 usage 快照。它会在 agent loop 中
+ *  `collectTurnResponse` 接受 provider 返回的 `usage` 对象后调用。
+ *  选择器只需通过尾部扫描读取最后一条 usage 记录，就能显示会话总量，
+ *  因此没必要为更早快照额外优化存储结构。 */
 export async function appendUsage(state: LoopState, modelId: string): Promise<void> {
   const filePath = getSessionFilePath(state)
   const entry: UsageEntry = {
@@ -224,21 +251,19 @@ export async function appendUsage(state: LoopState, modelId: string): Promise<vo
   await appendLine(filePath, entry)
 }
 
-/** Mark a compaction event and re-flush the (just-shrunk) message array.
- *  After this returns, the jsonl post-last-boundary content equals
- *  `state.messages` exactly — `loadSession` reconstructs the same in-memory
- *  state on resume.
+/** 标记一次压缩事件，并把刚刚缩短后的消息数组重新刷盘。
+ *  当它返回后，jsonl 中“最后一个 boundary 之后”的内容会与 `state.messages`
+ *  完全一致，因此 `loadSession` 在 resume 时能重建出相同的内存状态。
  *
- *  Why we re-append instead of relying on the pre-boundary messages: our
- *  `compressMessages` keeps a `recent N` slice verbatim, but those slices
- *  were already persisted before the boundary; the loader's
- *  "everything-after-last-boundary wins" rule would otherwise drop them.
- *  Duplicating ~6 messages on disk is cheap and keeps the load logic
- *  trivial.
+ *  之所以要重新追加，而不是依赖 boundary 之前的历史消息，是因为
+ *  `compressMessages` 会原样保留一个 `recent N` 切片，但这些消息在 boundary
+ *  之前其实已经写入过；若只依赖 loader 的“最后一个 boundary 之后内容生效”
+ *  规则，这些保留片段反而会被丢掉。磁盘上多重复 6 条左右消息代价很低，
+ *  却能让加载逻辑非常简单。
  *
- *  Light compaction (loop-guard pruning) calls this with `summary=undefined`
- *  — the trimmed messages still need a boundary so the loader doesn't
- *  resurrect the dropped loop-guard pairs. */
+ *  轻压缩（loop-guard pruning）会以 `summary=undefined` 调用这里。
+ *  即便没有 summary，被裁掉的消息仍然需要一个 boundary，
+ *  否则 loader 会把那些已删除的 loop-guard 成对消息重新复活。 */
 export async function markBoundaryAndReflush(state: LoopState, summary?: string): Promise<void> {
   const filePath = getSessionFilePath(state)
   const ts = new Date().toISOString()
@@ -251,19 +276,18 @@ export async function markBoundaryAndReflush(state: LoopState, summary?: string)
   }
   if (!(await appendRawLines(filePath, lines))) return
   state.persistedMessageCount = state.messages.length
-  // Compaction shrinks/rewrites the messages array — every prior
-  // checkpoint's `messageCount` now points past the end. Clear the
-  // in-memory list to mirror the loader's behaviour (which drops
-  // pre-boundary checkpoint lines on resume).
+  // 压缩会缩短并重写 messages 数组，因此所有旧 checkpoint 的
+  // `messageCount` 都可能越过新的数组末尾。这里同步清空内存列表，
+  // 与 loader 的行为保持一致（resume 时也会丢弃 boundary 之前的
+  // checkpoint 记录）。
   state.checkpoints = []
 }
 
-/** Append a rewind checkpoint marker. Fire-and-forget, like the other
- *  append helpers. On resume, `loadSession` collects these into
- *  `LoadedSession.checkpoints` so the picker can offer the same rewind
- *  points across CLI restarts. The "everything-after-last-boundary wins"
- *  loader rule naturally drops checkpoints whose `messageCount` was
- *  invalidated by a compaction. */
+/** 追加一条 rewind checkpoint 标记。与其他追加辅助函数一样，
+ *  采用尽力而为策略。resume 时，`loadSession` 会把它们收集到
+ *  `LoadedSession.checkpoints` 中，从而让 CLI 重启后仍能看到同样的
+ *  rewind 节点。按照 loader 的“最后一个 boundary 之后内容生效”规则，
+ *  那些被压缩后使 `messageCount` 失效的 checkpoint 会自然被丢弃。 */
 export async function appendCheckpoint(state: LoopState, entry: CheckpointEntry): Promise<void> {
   if (!state.sessionId) return
   const filePath = getSessionFilePath(state)
@@ -278,10 +302,9 @@ export async function appendCheckpoint(state: LoopState, entry: CheckpointEntry)
   await appendLine(filePath, jsonl)
 }
 
-/** Append an `interrupted` marker. Purely informational — the loader
- *  ignores it for state reconstruction; the picker can show "interrupted"
- *  next to sessions that ended mid-turn so users know what they're
- *  resuming into. */
+/** 追加一条 `interrupted` 标记。它纯粹是信息性记录：
+ *  loader 在恢复状态时会忽略它，但选择器可以据此在那些中途被打断的
+ *  session 旁边显示“已中断”，让用户知道自己将恢复到什么状态。 */
 export async function appendInterrupted(state: LoopState): Promise<void> {
   if (!state.sessionId) return
   const filePath = getSessionFilePath(state)
@@ -289,23 +312,31 @@ export async function appendInterrupted(state: LoopState): Promise<void> {
   await appendLine(filePath, entry)
 }
 
-// ── Read path: load + list ──────────────────────────────────────────────
+// ── 读取路径：加载与列举 ───────────────────────────────────────────
 
 export interface LoadedSession {
+  /** session 唯一标识。 */
   sessionId: string
+  /** 任务 slug，用于生成更易读的文件名。 */
   taskSlug: string
+  /** 会话启动时间。 */
   startedAt: string
+  /** 当时使用的模型 id。 */
   modelId: string
+  /** 该会话运行时的工作目录。 */
   cwd: string
+  /** 会话启动时的 git 分支名。 */
   gitBranch?: string
+  /** 首条用户消息的预览文本。 */
   firstPrompt: string
+  /** 从 jsonl 恢复出的消息数组。 */
   messages: ModelMessage[]
+  /** 最近一次 usage 快照。 */
   tokenUsage: TokenUsage
-  /** Rewind checkpoints surviving the last compact-boundary (if any).
-   *  The backing file manifests live under `.x-code/file-history/<sid>/`. */
+  /** 最后一个 compact-boundary 之后仍然有效的 rewind checkpoint 列表。
+   *  对应的文件 manifest 存放在 `.x-code/file-history/<sid>/` 下。 */
   checkpoints: CheckpointEntry[]
-  /** Path of the jsonl file so the agent loop can keep appending to the
-   *  same file when the user resumes. */
+  /** jsonl 文件路径，resume 后 agent loop 会继续向这同一个文件追加内容。 */
   filePath: string
 }
 
@@ -318,17 +349,15 @@ const EMPTY_USAGE: TokenUsage = {
   currentContextTokens: 0,
 }
 
-/** Walk a session jsonl and reconstruct a LoadedSession.
+/** 遍历某个 session 的 jsonl 文件，并重建出一个 LoadedSession。
  *
- *  Compact-boundary semantics (matches Claude Code): every time we see a
- *  `compact-boundary` line, the message accumulator is cleared. So the
- *  returned `messages` reflects only what's after the LAST boundary —
- *  which by construction equals the in-memory state at the point of
- *  compaction (see `markBoundaryAndReflush`).
+ *  compact-boundary 的语义与 Claude Code 一致：每遇到一条
+ *  `compact-boundary` 记录，就清空一次消息累积器。因此最终返回的
+ *  `messages` 只反映“最后一个 boundary 之后”的内容，而这正好与压缩时
+ *  的内存状态一致（见 `markBoundaryAndReflush`）。
  *
- *  Trailing tool_call / tool_result orphans are trimmed (the next API
- *  request would otherwise reject the message array) — see
- *  `sanitizeMessageTail` for the exact rule. */
+ *  尾部孤立的 tool_call / tool_result 会被裁掉，否则下一次 API 请求
+ *  会因为消息数组非法而被拒绝。具体规则见 `sanitizeMessageTail`。 */
 export async function loadSession(filePath: string): Promise<LoadedSession | null> {
   let raw: string
   try {
@@ -347,7 +376,7 @@ export async function loadSession(filePath: string): Promise<LoadedSession | nul
     try {
       entry = JSON.parse(line) as Entry
     } catch {
-      continue // skip malformed lines silently
+      continue // 静默跳过损坏的行
     }
     if (entry.t === 'meta') {
       if (entry.kind === 'header') {
@@ -356,8 +385,8 @@ export async function loadSession(filePath: string): Promise<LoadedSession | nul
         lastUsage = entry
       } else if (entry.kind === 'compact-boundary') {
         messages = []
-        // Checkpoints anchored to pre-compaction message counts are now
-        // meaningless — the array shrank under them. Drop along with msgs.
+        // 压缩前 messageCount 对应的 checkpoint 现在已失去意义，
+        // 因为 messages 数组已经缩短，所以与消息一起丢弃。
         checkpoints = []
       } else if (entry.kind === 'checkpoint') {
         checkpoints.push({
@@ -367,7 +396,7 @@ export async function loadSession(filePath: string): Promise<LoadedSession | nul
           userPrompt: entry.userPrompt,
         })
       }
-      // 'interrupted' is informational only — doesn't affect state
+      // 'interrupted' 仅作信息展示，不参与状态恢复
     } else if (entry.t === 'msg') {
       messages.push(entry.message)
     }
@@ -391,16 +420,15 @@ export async function loadSession(filePath: string): Promise<LoadedSession | nul
 
 type ToolCallPart = { type?: string; toolCallId?: string }
 
-/** Drop trailing assistant tool_calls that have no matching tool_result
- *  later in the array. Providers reject any orphan with "tool_use without
- *  tool_result", so resuming a session that ended mid-tool-execution must
- *  trim back to the last fully-resolved boundary.
+/** 裁掉尾部那些没有对应 tool_result 的 assistant tool_call。
+ *  provider 会把这类孤儿记录视为非法，报出类似
+ *  “tool_use without tool_result”，所以当 session 在工具执行中途结束时，
+ *  恢复前必须回退到最后一个完整闭合的边界。
  *
- *  Algorithm: collect every toolCallId that has a tool_result somewhere,
- *  then walk back from the end and drop any assistant message whose
- *  tool_call parts include an unresolved id. Stops at the first clean
- *  message (text-only assistant, or assistant whose every tool_call IS
- *  resolved). */
+ *  算法是：先收集所有已经拥有 tool_result 的 toolCallId，
+ *  再从尾部反向遍历消息，删除任何包含“未解决 tool_call id”的
+ *  assistant 消息；一旦遇到第一条干净消息（纯文本 assistant，
+ *  或所有 tool_call 都已闭合的 assistant）就停止。 */
 function sanitizeMessageTail(messages: ModelMessage[]): ModelMessage[] {
   const resolvedIds = new Set<string>()
   for (const msg of messages) {
@@ -419,12 +447,12 @@ function sanitizeMessageTail(messages: ModelMessage[]): ModelMessage[] {
       continue
     }
     if (msg.role !== 'assistant') {
-      // Bare 'tool' or 'user' at the tail without an upstream tool_call is
-      // legal — keep walking; the cut is driven only by orphan tool_calls.
+      // 尾部如果是裸露的 'tool' 或 'user'，即便上游没有 tool_call，
+      // 也是允许存在的；继续往前检查，裁剪条件只由孤立 tool_call 决定。
       break
     }
     const content = msg.content
-    if (typeof content === 'string') break // text-only assistant — clean tail
+    if (typeof content === 'string') break // 纯文本 assistant，说明尾部是干净的
     if (!Array.isArray(content)) break
     const hasOrphan = (content as ToolCallPart[]).some(
       (p) => p?.type === 'tool-call' && typeof p.toolCallId === 'string' && !resolvedIds.has(p.toolCallId),
@@ -438,25 +466,31 @@ function sanitizeMessageTail(messages: ModelMessage[]): ModelMessage[] {
   return cutAt < messages.length ? messages.slice(0, cutAt) : messages
 }
 
-// ── List for picker ─────────────────────────────────────────────────────
+// ── 供选择器列举会话 ───────────────────────────────────────────────
 
 export interface SessionListEntry {
+  /** 会话文件绝对路径。 */
   filePath: string
+  /** session 唯一标识。 */
   sessionId: string
+  /** 任务 slug。 */
   taskSlug: string
+  /** 首条用户消息预览。 */
   firstPrompt: string
+  /** 会话开始时间。 */
   startedAt: string
+  /** 会话使用的模型 id。 */
   modelId: string
-  /** File mtime in epoch milliseconds — sort key for the picker. */
+  /** 文件修改时间（epoch 毫秒），供选择器排序使用。 */
   mtime: number
+  /** 尾部扫描得到的最后一份 token 使用统计。 */
   tokenUsage: TokenUsage | null
 }
 
-/** Enumerate every session jsonl in the current project, newest first.
- *  Reads only the head (~8KB, for the header line) and tail (~4KB, for
- *  the last usage line) of each file — no full-file load — so the picker
- *  is responsive even with hundreds of historical sessions. Files
- *  without a parseable header are dropped silently. */
+/** 列出当前项目下的全部 session jsonl，按最新优先排序。
+ *  为了保证即便历史会话很多时选择器也足够流畅，这里只读取每个文件的
+ *  头部约 8KB（找 header）和尾部约 4KB（找最后一条 usage），
+ *  不会把整个文件完整加载进来。没有可解析 header 的文件会被静默忽略。 */
 export async function listSessions(cwd: string = process.cwd()): Promise<SessionListEntry[]> {
   const dir = sessionsDir(cwd)
   let entries: string[]
@@ -492,7 +526,7 @@ export async function listSessions(cwd: string = process.cwd()): Promise<Session
               tokenUsage = e.usage
               break
             } catch {
-              // Malformed line — keep scanning earlier lines.
+              // 当前行损坏了，就继续往更早的行扫描。
             }
           }
         }
@@ -514,8 +548,8 @@ export async function listSessions(cwd: string = process.cwd()): Promise<Session
   return results.filter((r): r is SessionListEntry => r !== null).sort((a, b) => b.mtime - a.mtime)
 }
 
-/** Read [offset, offset+length) bytes of a file as utf-8. Used by
- *  `listSessions` to grab head/tail without slurping the full file. */
+/** 以 utf-8 读取文件中 [offset, offset+length) 这段字节。
+ *  `listSessions` 用它来抓取头尾片段，避免把整个文件读入内存。 */
 async function readRange(filePath: string, offset: number, length: number): Promise<string> {
   if (length <= 0) return ''
   const fh = await fs.open(filePath, 'r')
@@ -528,28 +562,26 @@ async function readRange(filePath: string, offset: number, length: number): Prom
   }
 }
 
-/** Pick the most recently modified session file in the current project, or
- *  null if none exist. Used by `xc --continue` / `-c` to skip the picker
- *  and resume the latest session unconditionally. */
+/** 返回当前项目下最近一次修改的 session 文件；如果不存在则返回 null。
+ *  `xc --continue` / `-c` 会用它跳过选择器，直接恢复最新会话。 */
 export async function pickLatestSession(cwd: string = process.cwd()): Promise<SessionListEntry | null> {
   const all = await listSessions(cwd)
   return all[0] ?? null
 }
 
-/** Stable identifier for a session in picker UI. We can't use the filename
- *  directly (it can collide visually when multiple sessions share a slug)
- *  and the sessionId alone isn't unique across renames — but the file path
- *  is, by definition. Hashed to keep the choice label compact. */
+/** 为选择器 UI 生成稳定的 session 短标识。
+ *  不能直接用文件名，因为多个 session 可能共享 slug 而视觉上撞名；
+ *  也不能只用 sessionId，因为重命名后它本身不反映文件唯一路径。
+ *  文件路径天然唯一，因此这里对路径做哈希，再截短成紧凑标签。 */
 export function shortIdFor(filePath: string): string {
   return createHash('sha1').update(filePath).digest('hex').slice(0, 8)
 }
 
-/** Build a LoopState seeded from a previously-saved session. The agent
- *  loop accepts `existingState` and will continue appending to the same
- *  jsonl file (filename derives from `sessionId` + `taskSlug`, both
- *  preserved here). `persistedMessageCount` is set to the loaded length
- *  so the very first flush after the next user submit only appends NEW
- *  messages — the loaded tail is already on disk. */
+/** 基于已保存的 session 构建一个可继续使用的 LoopState。
+ *  agent loop 支持接收 `existingState`，并继续向同一份 jsonl 文件追加，
+ *  因为文件名依赖的 `sessionId` 和 `taskSlug` 都会在这里保留下来。
+ *  同时把 `persistedMessageCount` 设为已加载消息长度，这样下次用户提交后
+ *  的首次 flush 只会追加新消息，不会重复写入已经在磁盘上的尾部内容。 */
 export function hydrateLoopState(loaded: LoadedSession, initialMode: PermissionMode = 'default'): LoopState {
   const state = createLoopState(initialMode)
   state.sessionId = loaded.sessionId

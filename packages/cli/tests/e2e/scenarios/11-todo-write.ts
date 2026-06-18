@@ -3,6 +3,7 @@ import type { Scenario } from '../framework/types.js'
 const scenario: Scenario = {
   id: '11-todo-write',
   name: 'todoWrite：模型为多步任务建任务清单',
+  // 执行待办清单场景，验证模型会先建 todo 再按步骤执行。
   async run(ctx) {
     await ctx.writeFile('a.txt', 'A\n')
     await ctx.writeFile('b.txt', 'B\n')
@@ -10,11 +11,11 @@ const scenario: Scenario = {
 
     const r = await ctx.runCli(
       [
-        'I want you to do these 3 things in order:',
-        '  (1) read a.txt',
-        '  (2) read b.txt',
-        '  (3) read c.txt',
-        'Before reading anything, use the todoWrite tool to create a todo list with these 3 items. Then execute each one and update the todo status as you go.',
+        '我希望你按顺序完成这 3 件事：',
+        '  (1) 读取 a.txt',
+        '  (2) 读取 b.txt',
+        '  (3) 读取 c.txt',
+        '在读取任何内容之前，请先使用 todoWrite 工具创建一份包含这 3 项的待办清单。然后逐项执行，并在过程中更新 todo 状态。',
       ].join('\n'),
       { args: ['--trust', '--max-turns', '15'] },
     )
@@ -25,6 +26,7 @@ const scenario: Scenario = {
     ctx.expect.toolCalled(r, 'todoWrite', {
       todos: (todos: unknown) => {
         if (!Array.isArray(todos) || todos.length < 3) return false
+        // 把 todo 内容拼成一段文本，便于统一检查是否覆盖 a/b/c 三个文件。
         const blob = todos
           .map((t: unknown) => {
             if (!t || typeof t !== 'object') return ''

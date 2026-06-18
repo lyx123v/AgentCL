@@ -1,44 +1,41 @@
-// @x-code-cli/core — Reject env vars that are runtime code-injection vectors
+// @x-code-cli/core — 拒绝会导致运行时代码注入的危险环境变量
 //
-// MCP stdio servers inherit an `env` map straight through to spawn(). That
-// map can come from three sources:
-//   1. the user typing `xc mcp add --env KEY=VAL`
-//   2. the project / user mcp.json file
-//   3. a plugin manifest declaring its own mcpServers
+// MCP stdio 服务会把 `env` 原样透传给 spawn()。这些环境变量可能来自三处：
+//   1. 用户执行 `xc mcp add --env KEY=VAL`
+//   2. 项目级或用户级 mcp 配置文件
+//   3. 插件 manifest 中声明的 mcpServers
 //
-// (3) is the one this module exists to defend. Plugins run with the trust
-// the user gave them at install time, but a key like `NODE_OPTIONS=--require
-// ./evil.js` would let a plugin turn any node-based MCP server into
-// arbitrary code execution the next time it starts — escalating from
-// "manifest install" to "RCE under the user's account". The same trick
-// works on Linux (LD_PRELOAD) and macOS (DYLD_INSERT_LIBRARIES), and on
-// Python/Perl/Ruby runtimes via their respective *STARTUP / *OPT names.
+// 真正需要重点防的是第 3 类。插件在安装时已经获得一定信任，
+// 但如果它能塞入 `NODE_OPTIONS=--require ./evil.js` 这种键，
+// 就能在下次启动任意 Node 型 MCP 服务时执行任意代码，
+// 相当于把“安装 manifest”升级成“以当前用户身份执行代码”。
+// Linux 上有 LD_PRELOAD，macOS 上有 DYLD_INSERT_LIBRARIES，
+// Python / Perl / Ruby 也各有对应的启动钩子。
 //
-// We sit at the spawn boundary (registry.connectOneServer) so every source
-// is covered by one check, not just the CLI parser.
+// 我们把检查放在 spawn 边界（registry.connectOneServer），
+// 这样三种来源都能被同一处逻辑覆盖。
 //
-// This is a denylist, not an allowlist: legitimate MCP servers need to
-// accept arbitrary env keys for API tokens / app config, so an allowlist
-// would be unworkable. The denylist is short and targeted at names whose
-// only legitimate purpose is "load this code on start".
+// 这里使用 denylist，而不是 allowlist：
+// 合法 MCP 服务本来就需要接受任意 env key 来传 API token 或业务配置，
+// 用 allowlist 根本不可行。denylist 只针对那些“唯一用途几乎就是启动时注入代码”的键名。
 
-/** Env names that runtimes interpret as "load this code on start".
- *  Compared case-insensitively (see {@link assertSafeEnv}). */
+/** 会被运行时解释成“启动时加载这段代码”的环境变量名。
+ *  比较时不区分大小写，见 {@link assertSafeEnv}。 */
 const DANGEROUS_ENV_KEYS = new Set<string>([
   // Node
   'NODE_OPTIONS',
-  // Linux dynamic linker
+  // Linux 动态链接器
   'LD_PRELOAD',
   'LD_LIBRARY_PATH',
   'LD_AUDIT',
-  // macOS dynamic linker
+  // macOS 动态链接器
   'DYLD_INSERT_LIBRARIES',
   'DYLD_LIBRARY_PATH',
   'DYLD_FRAMEWORK_PATH',
   'DYLD_FALLBACK_LIBRARY_PATH',
   'DYLD_FALLBACK_FRAMEWORK_PATH',
-  // Shell init / per-command hooks. BASH_ENV runs on non-interactive bash;
-  // ENV runs on POSIX sh; PROMPT_COMMAND on every interactive prompt.
+  // Shell 初始化或每次执行的钩子。BASH_ENV 作用于非交互 bash；
+  // ENV 作用于 POSIX sh；PROMPT_COMMAND 会在每次交互提示符前执行。
   'BASH_ENV',
   'ENV',
   'PROMPT_COMMAND',
@@ -56,21 +53,17 @@ const DANGEROUS_ENV_KEYS = new Set<string>([
 export class UnsafeEnvError extends Error {
   constructor(public readonly key: string) {
     super(
-      `Env key "${key}" is blocked by the MCP env safety check: it is a runtime ` +
-        `code-loading hook (NODE_OPTIONS / LD_PRELOAD-class) and would let an MCP ` +
-        `config or plugin manifest run arbitrary code at server start. If you ` +
-        `really need this, export it in the shell that launches xc instead.`,
+      `环境变量 "${key}" 被 MCP 环境安全检查拦截：它属于运行时代码加载钩子（如 NODE_OPTIONS / LD_PRELOAD 类），` +
+        `会让 MCP 配置或插件 manifest 在服务启动时执行任意代码。若你确实需要它，请在启动 xc 的 shell 中自行导出。`,
     )
     this.name = 'UnsafeEnvError'
   }
 }
 
-/** Throw {@link UnsafeEnvError} if `env` contains a denylisted key.
+/** 如果 `env` 中包含 denylist 中的危险键，则抛出 {@link UnsafeEnvError}。
  *
- *  Comparison is case-insensitive: Windows env names are case-insensitive
- *  at the OS level, so rejecting `NODE_OPTIONS` while allowing
- *  `Node_Options` would be theatre. POSIX env names are case-sensitive but
- *  no legitimate config uses non-uppercase variants of these keys. */
+ *  比较过程不区分大小写：Windows 环境变量在操作系统层面本就大小写不敏感，
+ *  如果拦 `NODE_OPTIONS` 却放过 `Node_Options`，那只是形式上的安全。 */
 export function assertSafeEnv(env: Record<string, string> | undefined): void {
   if (!env) return
   for (const k of Object.keys(env)) {

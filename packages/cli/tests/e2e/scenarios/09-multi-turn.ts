@@ -3,11 +3,12 @@ import type { Scenario } from '../framework/types.js'
 const scenario: Scenario = {
   id: '09-multi-turn',
   name: 'agent loop 多轮：读 -> 分析 -> 编辑',
+  // 执行多轮场景，验证模型会先读取配置，再编辑目标字段。
   async run(ctx) {
     await ctx.writeFile('config.json', JSON.stringify({ feature: 'old', port: 3000 }, null, 2))
 
     const r = await ctx.runCli(
-      'In config.json, find the value of the "feature" field, then update it from "old" to "new" using the edit tool. Confirm the change in one sentence.',
+      '请在 config.json 中找到 `feature` 字段的值，然后使用 edit 工具把它从 `old` 改成 `new`。最后用一句话确认这次修改。',
       { args: ['--trust', '--max-turns', '10'] },
     )
     ctx.expect.exitCode(r, 0)

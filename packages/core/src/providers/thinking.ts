@@ -1,45 +1,39 @@
-// @x-code-cli/core — Per-provider extended-thinking / reasoning toggle
+// @x-code-cli/core — 按提供方区分的深度思考 / 推理开关
 //
-// Each provider exposes a different switch for "spend extra tokens reasoning
-// before producing output". The defaults across the eight providers we
-// support are inconsistent: Gemini and Kimi default ON; Claude Sonnet,
-// DeepSeek V4, Qwen, and most others default OFF; GPT-4.1/5.5 and
-// Grok-4.3 have no thinking concept at all on those exact model ids.
-// The user-facing `/thinking on|off` toggle is meant to give one uniform
-// knob across all of them.
+// 不同提供方对“先多消耗一些 token 进行推理，再输出结果”这件事提供了不同开关。
+// 我们支持的这些提供方默认值并不一致：Gemini 和 Kimi 默认开启；
+// Claude Sonnet、DeepSeek V4、Qwen 以及多数其他模型默认关闭；
+// GPT-4.1/5.5 和 Grok-4.3 在对应模型 id 上甚至没有“thinking”这个概念。
+// 面向用户的 `/thinking on|off` 就是为了把它们统一成一个一致的控制旋钮。
 //
-// We map the toggle to the closest equivalent in each provider's AI SDK:
+// 这里会把该开关映射到各家 AI SDK 中最接近的等价能力：
 //
 //   anthropic   thinking: { type: 'enabled' | 'disabled', budgetTokens }
 //   deepseek    thinking: { type: 'enabled' | 'disabled' }
 //   moonshotai  thinking: { type: 'enabled' | 'disabled' }
 //   alibaba     enableThinking: boolean
-//   google      thinkingConfig: { thinkingBudget: -1 (dynamic) | 0 (off) }
-//   xai         reasoningEffort: 'high' | 'low'         (grok-3-mini only)
-//   openai      reasoningEffort: 'high' | 'minimal'      (o-series only)
-//   zhipu       thinking: { type: 'enabled' | 'disabled' } (GLM-5/5.1;
-//                 GLM-4-Plus ignores it silently)
+//   google      thinkingConfig: { thinkingBudget: -1（动态）| 0（关闭） }
+//   xai         reasoningEffort: 'high' | 'low'            （仅 grok-3-mini 等）
+//   openai      reasoningEffort: 'high' | 'minimal'        （仅 o 系列等）
+//   zhipu       thinking: { type: 'enabled' | 'disabled' } （GLM-5/5.1；
+//                 GLM-4-Plus 会静默忽略）
 //
-// The numeric budget for Anthropic is set generous-but-not-unbounded:
-// 8000 reasoning tokens covers everything short of the longest agent loops
-// and stays well under the 1M context window budget. Users on Opus who want
-// a wider budget can edit this and rebuild — exposing a `budget` slash arg
-// is over-engineering for a feature most users will leave at "on" or "off".
+// Anthropic 的数值预算设置得比较宽松但不过度：8000 个 reasoning token
+// 足以覆盖除超长 agent loop 之外的大多数场景，同时远低于 100 万上下文窗口上限。
+// 如果 Opus 用户想要更高预算，可以直接改这里再重建；单独暴露一个 `budget`
+// 斜杠参数，对一个大多数用户只会在 “on / off” 二选一的功能来说有点过度设计。
 import { providerOf } from './capabilities.js'
 
 const ANTHROPIC_BUDGET_TOKENS = 8000
 
 /**
- * Build the `providerOptions` entry needed to put the given model into the
- * desired thinking state. Returns an empty object when the model has no
- * thinking knob (so callers can spread/merge unconditionally).
+ * 构造把指定模型切换到目标 thinking 状态所需的 `providerOptions`。
+ * 如果该模型没有 thinking 相关开关，则返回空对象，便于调用方无条件合并。
  *
- * `enabled` semantics:
- *   true  — opt INTO maximum reasoning the provider supports
- *   false — opt OUT (or pin to a low/disabled mode where the provider
- *           defaults to thinking-on and forces some always-on minimum,
- *           e.g. Gemini 2.5 Pro can't go below 128 tokens — we still
- *           ask for the lowest the SDK accepts)
+ * `enabled` 语义：
+ *   true  — 主动开启，并尽量使用提供方支持的高推理模式
+ *   false — 主动关闭；如果提供方默认强制开启并且有最低推理预算限制，
+ *           就退而求其次，请求一个尽可能低或最接近关闭的模式
  */
 export function getThinkingProviderOptions(modelId: string, enabled: boolean): Record<string, Record<string, unknown>> {
   const provider = providerOf(modelId)
@@ -50,51 +44,50 @@ export function getThinkingProviderOptions(modelId: string, enabled: boolean): R
         : { anthropic: { thinking: { type: 'disabled' } } }
 
     case 'deepseek':
-      // V4 family supports the toggle; the legacy `deepseek-chat` /
-      // `deepseek-reasoner` ids ignore unknown providerOptions silently.
+      // V4 系列支持这个开关；旧版 `deepseek-chat` /
+      // `deepseek-reasoner` 会静默忽略不认识的 providerOptions。
       return enabled
         ? { deepseek: { thinking: { type: 'enabled' } } }
         : { deepseek: { thinking: { type: 'disabled' } } }
 
     case 'moonshotai':
-      // kimi-k2.5 is a thinking model by default; explicit `disabled`
-      // turns reasoning off on the provider side.
+      // kimi-k2.5 默认就是推理模型；显式传 `disabled`
+      // 可以在提供方侧关闭推理。
       return enabled
         ? { moonshotai: { thinking: { type: 'enabled' } } }
         : { moonshotai: { thinking: { type: 'disabled' } } }
 
     case 'alibaba':
-      // Hybrid Qwen ids honour `enableThinking` per-request; the
-      // dedicated reasoning ids (qwq-plus, qwen3-*-thinking-*) ignore
-      // an `enableThinking: false` request and keep thinking on.
+      // 混合型 Qwen 模型会按请求尊重 `enableThinking`；
+      // 专用推理模型（如 qwq-plus、qwen3-*-thinking-*）即便收到
+      // `enableThinking: false` 也会继续保持 thinking 开启。
       return { alibaba: { enableThinking: enabled } }
 
     case 'google':
-      // Gemini 2.5 Pro can't be fully turned off (min budget 128) — we
-      // still send `thinkingBudget: 0` for OFF and let the SDK clamp;
-      // 2.5 Flash and Lite respect 0 as "no thinking". `-1` is the SDK's
-      // sentinel for "dynamic budget — model decides", which is what
-      // Pro uses by default and what we want for ON anywhere.
+      // Gemini 2.5 Pro 无法完全关闭（最小预算是 128）；
+      // 这里在 OFF 时仍发送 `thinkingBudget: 0`，交给 SDK 做钳制。
+      // 2.5 Flash 和 Lite 会把 0 当作“不思考”。
+      // `-1` 是 SDK 表示“动态预算，由模型自行决定”的哨兵值，
+      // 这也是 Pro 默认行为，且符合我们对 ON 的预期。
       return enabled
         ? { google: { thinkingConfig: { thinkingBudget: -1 } } }
         : { google: { thinkingConfig: { thinkingBudget: 0 } } }
 
     case 'xai':
-      // Only grok-3-mini and grok-4-mini honour `reasoningEffort`; grok-3
-      // and grok-4 ignore it. Sending the option is harmless on the
-      // ignoring models — the SDK passes it through and the API silently
-      // discards it.
+      // 只有 grok-3-mini 和 grok-4-mini 会真正识别 `reasoningEffort`；
+      // grok-3 和 grok-4 会忽略它。即便如此，发送这个选项也无害：
+      // SDK 会原样透传，API 会静默丢弃。
       return enabled ? { xai: { reasoningEffort: 'high' } } : { xai: { reasoningEffort: 'low' } }
 
     case 'openai':
-      // Only o-series and gpt-5 reasoning models use `reasoningEffort`;
-      // gpt-4.1 ignores it. Same harmless pass-through as xAI.
+      // 只有 o 系列和 gpt-5 推理模型会使用 `reasoningEffort`；
+      // gpt-4.1 会忽略它。和 xAI 一样，透传这个选项是安全的。
       return enabled ? { openai: { reasoningEffort: 'high' } } : { openai: { reasoningEffort: 'minimal' } }
 
     case 'zhipu':
-      // GLM-5/5.1 support thinking via the same pattern as DeepSeek;
-      // GLM-4-Plus does not. Sending the option is harmless on the
-      // non-supporting models — the API silently ignores it.
+      // GLM-5/5.1 使用与 DeepSeek 类似的 thinking 开关；
+      // GLM-4-Plus 不支持。对不支持的模型发送此选项也没关系，
+      // API 会静默忽略。
       return enabled ? { zhipu: { thinking: { type: 'enabled' } } } : { zhipu: { thinking: { type: 'disabled' } } }
 
     case 'custom':
@@ -103,10 +96,10 @@ export function getThinkingProviderOptions(modelId: string, enabled: boolean): R
   }
 }
 
-/** Merge thinking-mode providerOptions into an existing providerOptions
- *  bag without clobbering unrelated keys (e.g. Anthropic cache-control).
- *  Per-provider entries are deep-merged at one level: x.thinking and
- *  x.cacheControl can coexist on `providerOptions.anthropic`. */
+/** 把 thinking 模式对应的 providerOptions 合并进已有配置，
+ *  且不覆盖无关字段（例如 Anthropic 的 cache-control）。
+ *  合并粒度是“每个 provider 下一层对象”，因此 `x.thinking` 与
+ *  `x.cacheControl` 可以同时存在于 `providerOptions.anthropic` 中。 */
 export function mergeThinkingOptions(
   base: Record<string, unknown> | undefined,
   thinking: Record<string, Record<string, unknown>>,

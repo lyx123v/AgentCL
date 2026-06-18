@@ -1,4 +1,4 @@
-// @x-code-cli/core — System Prompt management
+// @x-code-cli/core — System Prompt 管理
 import path from 'node:path'
 
 import { getShellProvider } from '../tools/shell-provider.js'
@@ -104,22 +104,22 @@ When you see a tool result starting with [Truncated:], the original output was r
 - Working Directory: {cwd}
 - Is Git Repo: {isGitRepo}`
 
-/** Plan-mode overlay appended to the base system prompt when
- *  `permissionMode === 'plan'`. Verbatim port of Claude Code's
- *  interview-phase plan-mode prompt (`messages.ts:3331-3382`), with
- *  read-only tool names + plan-file path substituted for our codebase.
- *  The overlay lives in the byte-stable systemPromptCache and is
- *  rebuilt only when permissionMode flips — within a mode, every turn
- *  reuses the same prefix, preserving prefix-cache hits.
+/** 当 `permissionMode === 'plan'` 时，附加到基础 system prompt
+ *  末尾的 plan-mode 覆盖层。它是 Claude Code 在访谈式规划阶段 prompt
+ *  （`messages.ts:3331-3382`）的等价移植，只把只读工具名和 plan 文件路径
+ *  换成了我们代码库里的版本。
  *
- *  Why the iterative-interview shape matters: the BIG behavioral
- *  difference between plan mode and default mode in Claude Code is
- *  that plan mode is **conversational and turn-bounded** — every turn
- *  ends with either askUser or exitPlanMode, never with the model just
- *  trailing off. That's what gives plan mode its "user is in the
- *  driver's seat" feel. Without this rule, plan mode collapses into
- *  default mode with a read-only suffix and offers no real UX value.
- *  See a.log in the repo for an example of the right behavior shape. */
+ *  这段 overlay 会进入字节稳定的 systemPromptCache，并且只会在
+ *  permissionMode 发生切换时重建；在同一种 mode 内，每个 turn 都复用
+ *  完全相同的前缀，从而保留 prefix-cache 命中。
+ *
+ *  之所以强调“迭代式访谈”的形状，是因为在 Claude Code 里，
+ *  plan mode 与 default mode 最大的行为差异就在于：
+ *  plan mode 是**对话式、按回合收束的**。每个 turn 要么以 askUser 结束，
+ *  要么以 exitPlanMode 结束，绝不会让模型随意拖尾收场。
+ *  这正是它能让用户保持“主驾驶位”感受的关键。少了这条规则，
+ *  plan mode 就会退化成一个只读后缀版 default mode，几乎失去 UX 价值。
+ *  仓库里的 a.log 里有一个符合预期行为形态的例子。 */
 const PLAN_MODE_OVERLAY = `
 
 Plan mode is active. The user indicated that they do not want you to execute yet -- you MUST NOT make any edits (with the exception of the plan file mentioned below), run any non-readonly tools (including changing configs or making commits), or otherwise make any changes to the system. This supercedes any other instructions you have received.
@@ -203,9 +203,9 @@ If you find yourself wanting to ask "is the plan good?" in any form: stop, call 
 
 **askUser is for**: clarifying requirements, choosing between technical approaches DURING planning (e.g. "Redis vs in-memory cache?"), prioritizing what to include. Never for plan approval.`
 
-/** Build a focused system prompt for a sub-agent invocation.
- *  Shorter than the parent prompt — no plan-mode overlay, no auto-memory
- *  guidelines, no response-format rules. Just role + environment + contract. */
+/** 为子 agent 调用构建一份更聚焦的 system prompt。
+ *  它比父 agent 的 prompt 更短，不包含 plan-mode overlay、
+ *  auto-memory 规范，也不包含响应格式规则，只保留角色、环境和输出约定。 */
 export function buildSubAgentSystemPrompt(options: {
   agentPrompt: string
   knowledgeContext: string
@@ -235,19 +235,21 @@ ${options.knowledgeContext || '(none)'}
 - IMPORTANT: You MUST NOT use any emojis, icons, or special Unicode symbols in your responses.`
 }
 
-/** Describes one MCP tool well enough for the system prompt. The
- *  description is truncated to ~200 chars upstream so it doesn't bloat
- *  the prompt — overly verbose server descriptions are a real problem
- *  in the wild. */
+/** 以 system prompt 足够理解的粒度描述一个 MCP 工具。
+ *  description 会在上游截断到约 200 个字符，避免把 prompt 撑得过大；
+ *  现实里服务端给出过长描述是非常常见的问题。 */
 export interface SystemPromptMcpTool {
+  /** 注入到 prompt 中时使用的可调用工具名。 */
   callableName: string
+  /** 工具所属的 MCP server 名称。 */
   serverName: string
+  /** 工具描述文本。 */
   description: string
 }
 
-/** Format the optional skills block. Returns "" when no skills are loaded
- *  so the prompt is byte-identical to the no-skills shape, preserving
- *  prefix-cache hits for sessions without any skills configured. */
+/** 格式化可选的 skills 区块。若没有加载任何 skill，就返回空字符串，
+ *  让最终 prompt 与“无 skills”版本保持字节级一致，从而为未配置 skills
+ *  的 session 保住 prefix-cache 命中。 */
 function formatSkillCapabilities(skills: readonly { name: string; description: string }[] | undefined): string {
   const userSkillsDir = path.join(USER_XCODE_DIR, 'skills', '<name>', 'SKILL.md')
   const installHint = `To install a skill from a URL: use the shell tool to download the raw file directly (e.g. \`Invoke-WebRequest -Uri <url> -OutFile "${userSkillsDir}"\` on Windows, or \`curl -L <url> -o "${userSkillsDir}"\` on macOS/Linux), then confirm the path. Do NOT use webFetch + write — webFetch renders markdown and corrupts YAML frontmatter. Alternatively, use /skill install <url>. After installing, run /skill refresh to load the new skill in this session, or restart xc.`
@@ -269,16 +271,14 @@ function formatSkillCapabilities(skills: readonly { name: string; description: s
   return lines.join('\n')
 }
 
-/** Format the optional MCP tools block. Returns "" when no tools AND
- *  no registry are passed, so the byte layout of BASE_SYSTEM_PROMPT
- *  after substitution exactly matches the pre-MCP version — preserves
- *  prefix-cache hits for sessions without any MCP configuration.
+/** 格式化可选的 MCP 工具区块。若既没有工具也没有 registry，
+ *  就返回空字符串，使 BASE_SYSTEM_PROMPT 在替换后的字节布局与
+ *  引入 MCP 之前完全一致，从而保留未配置 MCP session 的 prefix-cache 命中。
  *
- *  When MCP is active the block always lists the two built-in
- *  resource tools (listMcpResources / readMcpResource) at the top
- *  even if no server-specific tools exist — because the resource
- *  tools only get registered when MCP is active, so their advertising
- *  must travel with this same block. */
+ *  只要 MCP 处于启用状态，这个区块都会在顶部列出两个内建资源工具
+ *  （listMcpResources / readMcpResource），哪怕当前没有任何服务端专属工具。
+ *  因为这两个资源工具本身也是“只有 MCP 启用时才会注册”，所以它们的说明
+ *  必须与这个区块一起出现。 */
 function formatMcpCapabilities(mcpTools: readonly SystemPromptMcpTool[] | undefined): string {
   if (mcpTools === undefined) return ''
 
@@ -295,8 +295,8 @@ function formatMcpCapabilities(mcpTools: readonly SystemPromptMcpTool[] | undefi
     return lines.join('\n')
   }
 
-  // Group by server for readability. Within a group, preserve incoming
-  // order (the registry hands them out in a stable order).
+  // 为了可读性按 server 分组；组内保持原始顺序，
+  // 因为 registry 本身给出的顺序是稳定的。
   const byServer = new Map<string, SystemPromptMcpTool[]>()
   for (const t of mcpTools) {
     const list = byServer.get(t.serverName) ?? []
@@ -313,26 +313,25 @@ function formatMcpCapabilities(mcpTools: readonly SystemPromptMcpTool[] | undefi
   return lines.join('\n')
 }
 
-/** Build the full system prompt with dynamic values and optional knowledge context */
+/** 基于动态参数和可选知识上下文，构建完整 system prompt。 */
 export function buildSystemPrompt(options?: {
   knowledgeContext?: string
   modelId?: string
   isGitRepo?: boolean
-  /** When true, append the plan-mode overlay (read-only constraints +
-   *  exitPlanMode handoff). Pair with `planFilePath` so the model knows
-   *  which path is allowed for writes. */
+  /** 为 true 时，附加 plan-mode overlay（只读约束 +
+   *  exitPlanMode 交接说明）。应与 `planFilePath` 搭配使用，
+   *  让模型知道唯一允许写入的是哪个路径。 */
   planMode?: boolean
-  /** Absolute path to the session's plan file. Required when
-   *  `planMode === true`; ignored otherwise. */
+  /** 当前 session 的 plan 文件绝对路径。仅在 `planMode === true`
+   *  时有意义，其他情况下会被忽略。 */
   planFilePath?: string
-  /** Optional MCP tool surface. When provided, an additional
-   *  `## MCP Tools` section is appended to `## Capabilities`. When
-   *  absent or empty, the prompt body is byte-identical to the
-   *  pre-MCP version. */
+  /** 可选的 MCP 工具视图。传入后会在 `## Capabilities` 后追加
+   *  一个 `## MCP Tools` 区块；缺失或为空时，prompt 主体与引入 MCP 前
+   *  的版本保持字节级一致。 */
   mcpTools?: readonly SystemPromptMcpTool[]
-  /** Optional skill surface. When provided, an `## Available Skills`
-   *  section is appended listing each skill name + description. When
-   *  absent or empty, the prompt is byte-identical to the no-skills shape. */
+  /** 可选的 skill 视图。传入后会追加 `## Available Skills` 区块，
+   *  列出每个 skill 的名称和描述；缺失或为空时，prompt 与无 skills
+   *  版本保持字节级一致。 */
   skills?: readonly { name: string; description: string }[]
 }): string {
   const shellProvider = getShellProvider()

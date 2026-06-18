@@ -1,4 +1,4 @@
-// Tests for agent/compression.ts — progress callbacks and token stats
+// agent/compression.ts 的测试，重点覆盖压缩进度回调与 token 统计。
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { generateText } from 'ai'
@@ -26,8 +26,9 @@ vi.mock('../src/agent/session-store.js', () => ({
   markBoundaryAndReflush: vi.fn().mockResolvedValue(undefined),
 }))
 
-// ── Helpers ──
+// ── 辅助函数 ──
 
+// 生成默认回调集合，并允许测试按需覆写个别实现。
 function makeCallbacks(overrides: Partial<AgentCallbacks> = {}): AgentCallbacks {
   return {
     onTextDelta: vi.fn(),
@@ -50,6 +51,7 @@ function makeCallbacks(overrides: Partial<AgentCallbacks> = {}): AgentCallbacks 
 
 const fakeModel = {} as LanguageModel
 
+// 生成一批足够长的消息，用来触发压缩逻辑。
 function padMessages(count: number): ModelMessage[] {
   const msgs: ModelMessage[] = []
   for (let i = 0; i < count; i++) {
@@ -66,7 +68,7 @@ function padMessages(count: number): ModelMessage[] {
 describe('compressMessages', () => {
   beforeEach(() => vi.clearAllMocks())
 
-  it('returns messages unchanged when there are fewer than KEEP_RECENT', async () => {
+  it('消息数少于 KEEP_RECENT 时会原样返回', async () => {
     const msgs: ModelMessage[] = [
       { role: 'user', content: 'hi' },
       { role: 'assistant', content: 'hello' },
@@ -76,7 +78,7 @@ describe('compressMessages', () => {
     expect(generateText).not.toHaveBeenCalled()
   })
 
-  it('calls generateText and returns summary + recent messages', async () => {
+  it('会调用 generateText，并返回摘要加最近消息', async () => {
     vi.mocked(generateText).mockResolvedValue({ text: 'Summary of old conversation' } as any)
     const msgs = padMessages(KEEP_RECENT + 2)
     const result = await compressMessages(msgs, fakeModel)
@@ -89,12 +91,12 @@ describe('compressMessages', () => {
   })
 })
 
-// ── checkAndCompressContext (proactive) ──
+// ── checkAndCompressContext（主动压缩） ──
 
 describe('checkAndCompressContext', () => {
   beforeEach(() => vi.clearAllMocks())
 
-  it('does nothing when below threshold', async () => {
+  it('低于阈值时不做任何事', async () => {
     const state = createLoopState()
     state.messages = padMessages(2)
     const cb = makeCallbacks()
@@ -105,7 +107,7 @@ describe('checkAndCompressContext', () => {
     expect(cb.onContextCompressed).not.toHaveBeenCalled()
   })
 
-  it('emits progress phases and compressed message with token stats on full compression', async () => {
+  it('完整压缩时会发出阶段进度，并生成带 token 统计的压缩提示', async () => {
     vi.mocked(generateText).mockResolvedValue({ text: 'compressed summary' } as any)
     const state = createLoopState()
     state.messages = padMessages(KEEP_RECENT + 4)
@@ -115,17 +117,17 @@ describe('checkAndCompressContext', () => {
     await checkAndCompressContext(state, fakeModel, 1, cb)
 
     const progressCalls = vi.mocked(cb.onCompressionProgress!).mock.calls.map((c) => c[0])
-    expect(progressCalls).toContain('Removing duplicate tool calls...')
-    expect(progressCalls).toContain('Truncating old tool results...')
-    expect(progressCalls).toContain('Generating session summary...')
-    expect(progressCalls).toContain('Summarizing conversation...')
+    expect(progressCalls).toContain('正在移除重复的工具调用……')
+    expect(progressCalls).toContain('正在截断较旧的工具结果……')
+    expect(progressCalls).toContain('正在生成会话摘要……')
+    expect(progressCalls).toContain('正在总结对话……')
 
     expect(cb.onContextCompressed).toHaveBeenCalledOnce()
     const compressedMsg = vi.mocked(cb.onContextCompressed).mock.calls[0][0]
-    expect(compressedMsg).toMatch(/Context compressed: ~\d+k → ~\d+k tokens\./)
+    expect(compressedMsg).toMatch(/上下文已压缩：约 \d+k → \d+k tokens。/)
   })
 
-  it('works when onCompressionProgress is undefined', async () => {
+  it('即使 onCompressionProgress 未定义也能正常工作', async () => {
     vi.mocked(generateText).mockResolvedValue({ text: 'summary' } as any)
     const state = createLoopState()
     state.messages = padMessages(KEEP_RECENT + 4)
@@ -138,7 +140,7 @@ describe('checkAndCompressContext', () => {
     expect(cb.onContextCompressed).toHaveBeenCalled()
   })
 
-  it('resets lastInputTokens and sets expectCacheMiss after deep compression', async () => {
+  it('深度压缩后会重置 lastInputTokens，并设置 expectCacheMiss', async () => {
     vi.mocked(generateText).mockResolvedValue({ text: 'summary' } as any)
     const state = createLoopState()
     state.messages = padMessages(KEEP_RECENT + 4)
@@ -151,19 +153,19 @@ describe('checkAndCompressContext', () => {
   })
 })
 
-// ── handleContextTooLong (reactive) ──
+// ── handleContextTooLong（被动压缩） ──
 
 describe('handleContextTooLong', () => {
   beforeEach(() => vi.clearAllMocks())
 
-  it('returns false when messages are too few', async () => {
+  it('消息过少时返回 false', async () => {
     const state = createLoopState()
     state.messages = [{ role: 'user', content: 'hi' }]
     const result = await handleContextTooLong(state, fakeModel, makeCallbacks())
     expect(result).toBe(false)
   })
 
-  it('emits progress and compressed message with token stats', async () => {
+  it('会发出进度，并生成带 token 统计的压缩提示', async () => {
     vi.mocked(generateText).mockResolvedValue({ text: 'compressed' } as any)
     const state = createLoopState()
     state.messages = padMessages(KEEP_RECENT + 4)
@@ -172,13 +174,13 @@ describe('handleContextTooLong', () => {
     const result = await handleContextTooLong(state, fakeModel, cb)
 
     expect(result).toBe(true)
-    expect(cb.onCompressionProgress).toHaveBeenCalledWith('Summarizing conversation...')
+    expect(cb.onCompressionProgress).toHaveBeenCalledWith('正在总结对话……')
 
     const compressedMsg = vi.mocked(cb.onContextCompressed).mock.calls[0][0]
-    expect(compressedMsg).toMatch(/Context too long — compressed \(~\d+k → ~\d+k tokens\)\. Retrying\.\.\./)
+    expect(compressedMsg).toMatch(/上下文过长，已压缩（约 \d+k → \d+k tokens）。正在重试……/)
   })
 
-  it('resets lastInputTokens and sets expectCacheMiss', async () => {
+  it('会重置 lastInputTokens，并设置 expectCacheMiss', async () => {
     vi.mocked(generateText).mockResolvedValue({ text: 'compressed' } as any)
     const state = createLoopState()
     state.messages = padMessages(KEEP_RECENT + 4)

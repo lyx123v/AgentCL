@@ -1,72 +1,73 @@
-// @x-code-cli/core — Shared utilities and constants
+// @x-code-cli/core — 共享工具函数与常量
 import fsSync from 'node:fs'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
-/** Project-local config directory name */
+/** 项目内本地配置目录名。 */
 export const XCODE_DIR = '.x-code'
 
-/** User-scope config directory (~/.x-code). Frozen at module load — use
- *  {@link userXcodeDir} when you want the `X_CODE_HOME` override applied. */
+/** 用户级配置目录（`~/.x-code`）。
+ *  这个值在模块加载时就固定下来了；如果你希望应用 `X_CODE_HOME`
+ *  覆盖逻辑，请改用 {@link userXcodeDir}。 */
 export const USER_XCODE_DIR = path.join(os.homedir(), '.x-code')
 
-/** Resolve the user-scope config root at CALL TIME, honouring `X_CODE_HOME`.
- *  Use this in path helpers across the codebase so a single env var can
- *  reroute everything that lives under `~/.x-code/` for sandbox testing
- *  or per-user isolation. Falling back to the frozen {@link USER_XCODE_DIR}
- *  keeps the normal case allocation-free. */
+/** 在调用时解析用户级配置根目录，并尊重 `X_CODE_HOME`。
+ *  代码库里凡是需要拼接 `~/.x-code/` 下路径的地方，都应该优先用它，
+ *  这样只靠一个环境变量就能在沙箱测试或用户隔离场景里整体改道。
+ *  如果没有覆盖值，就回退到已冻结的 {@link USER_XCODE_DIR}，
+ *  保持常规路径零额外分配。 */
 export function userXcodeDir(): string {
   return process.env.X_CODE_HOME ?? USER_XCODE_DIR
 }
 
-// ── Debug log (shared by core + cli) ────────────────────────────────────
-// Turn on with `DEBUG_STDOUT=1`. Writes to ~/.x-code/logs/debug.log so a
-// globally-installed CLI doesn't pollute the user's project tree and so
-// every invocation across every cwd ends up in one greppable file.
+// ── 调试日志（core + cli 共用）──────────────────────────────────────
+// 通过 `DEBUG_STDOUT=1` 开启。日志写入 `~/.x-code/logs/debug.log`，
+// 这样全局安装的 CLI 不会污染用户项目目录，而且无论从哪个 cwd 启动，
+// 都会汇总到同一个便于 `grep` 的文件里。
 //
-// Sync I/O is deliberate: callers are in hot paths (every stream chunk,
-// every tool call) and we want on-disk ordering to match real-time event
-// order. An async queue would reorder entries under backpressure.
+// 这里故意使用同步 I/O：调用点都在热点路径上（每个流分片、每次工具调用），
+// 我们希望落盘顺序和真实事件顺序严格一致；异步队列在背压下可能改变顺序。
 //
-// Performance: we keep ONE open file descriptor for the lifetime of the
-// process (writeSync ~10μs) instead of appendFileSync (~100μs each — open +
-// write + close per call). On rotation we close + reopen. The fd is
-// inherited at exit and closed by the kernel, so no explicit teardown.
+// 性能方面：整个进程生命周期只维持一个打开的文件描述符
+//（`writeSync` 大约 10μs），而不是每次都 `appendFileSync`
+//（单次大约 100μs，包含打开、写入、关闭）。轮转时再关闭并重开。
+// 进程退出时 fd 会交给内核回收，所以不用显式清理。
 //
-// Bounded per-line size: a single `stream.tool-result` from reading a large
-// file can otherwise consume tens of KB in one entry, eating most of the
-// 1MB budget in a handful of lines. We hard-cap each entry at MAX_LINE_BYTES
-// so even chatty turns yield at least ~250 lines/MB of grep-able context.
+// 限制单行大小：如果读取了大文件，一个 `stream.tool-result`
+// 单条日志就可能吃掉几十 KB，很快把预算耗尽。这里对每一条记录强制应用
+// `MAX_LINE_BYTES` 上限，这样即使输出很“话痨”，每 MB 也至少还能保留
+// 约 250 行可检索上下文。
 //
-// Rotation: two-file scheme (debug.log + debug.log.1). When the active file
-// reaches MAX_LOG_BYTES we rename it over .1 and start fresh, capping total
-// disk use at ~2× MAX_LOG_BYTES. Same shape pip / Cargo / npm use for cache
-// logs at small scale — simple enough we don't need a logrotate cron.
+// 轮转策略：双文件方案（`debug.log` + `debug.log.1`）。
+// 当前文件达到 `MAX_LOG_BYTES` 时，把它重命名为 `.1` 并重新开始写，
+// 从而把总磁盘占用限制在约 `2 × MAX_LOG_BYTES`。这和 pip / Cargo /
+// npm 处理小规模缓存日志的思路类似，简单到不需要额外 logrotate 任务。
 const DEBUG = process.env.DEBUG_STDOUT === '1'
-/** Per-file size cap. Total disk = 2× this (active + rotated). 10MB chosen
- *  so a typical multi-turn agent run (~85KB/turn × 50–100 turns) lands
- *  entirely in the active file — grep/tail doesn't need to span rotation
- *  for normal debugging. The combined 20MB is still small enough to attach
- *  to a bug report verbatim. */
+/** 单文件大小上限。
+ *  总磁盘占用约等于它的 2 倍（当前文件 + 轮转文件）。
+ *  这里选 10MB，是因为典型多轮 agent 运行（约 85KB/轮 × 50–100 轮）
+ *  大多能完整落在当前文件中，日常排查时 `grep` / `tail` 不必跨轮转文件。
+ *  两个文件加起来的 20MB 也仍然适合直接附到 bug 报告里。 */
 const MAX_LOG_BYTES = 10 * 1024 * 1024
-/** Per-entry truncation cap. Bounds worst-case line size — without this a
- *  single huge tool-result could eat the whole budget in a handful of
- *  entries. 1KB keeps the worst case at ~5k lines per file (~10k across
- *  rotation) while still leaving room for short stack traces and small
- *  payloads in full. Typical lines are <200 bytes, so the realistic per-
- *  file count is in the tens of thousands. */
+/** 单条日志的截断上限。
+ *  用来限制最坏情况下的单行体积，否则一个超大的 tool-result
+ *  可能几条就把整个预算吃光。1KB 的上限让单文件最差也能保留约 5k 行
+ * （轮转后约 10k 行），同时依然能完整容纳短栈追踪和小型 payload。
+ *  典型日志行通常不到 200 字节，所以真实可容纳行数一般会到几万。 */
 const MAX_LINE_BYTES = 1024
 
 const LOG_DIR = path.join(USER_XCODE_DIR, 'logs')
 const LOG_FILE = path.join(LOG_DIR, 'debug.log')
 const LOG_FILE_OLD = path.join(LOG_DIR, 'debug.log.1')
 
-/** In-memory byte counter for the active file. Avoids a statSync on every
- *  hot-path debugLog call — only hit disk when initialising or rotating. */
+/** 当前活动日志文件的内存字节计数器。
+ *  这样 `debugLog` 走热点路径时不需要每次都 `statSync`，
+ *  只在初始化或轮转时访问磁盘。 */
 let currentLogBytes = -1
 let logFd: number | null = null
 
+/** 确保日志目录、文件描述符和当前文件大小计数都已准备好。 */
 function ensureLogReady(): void {
   if (logFd !== null) return
   fsSync.mkdirSync(LOG_DIR, { recursive: true })
@@ -74,13 +75,14 @@ function ensureLogReady(): void {
     try {
       currentLogBytes = fsSync.statSync(LOG_FILE).size
     } catch {
-      // File doesn't exist yet — open() in 'a' mode will create it.
+      // 文件尚不存在，`open()` 使用 `a` 模式时会自动创建。
       currentLogBytes = 0
     }
   }
   logFd = fsSync.openSync(LOG_FILE, 'a')
 }
 
+/** 在写入前判断是否需要进行日志轮转。 */
 function rotateIfNeeded(nextWriteBytes: number): void {
   if (currentLogBytes + nextWriteBytes < MAX_LOG_BYTES) return
   try {
@@ -88,42 +90,39 @@ function rotateIfNeeded(nextWriteBytes: number): void {
       fsSync.closeSync(logFd)
       logFd = null
     }
-    // rename silently overwrites the previous .1 on POSIX. On Windows
-    // rename fails if the target exists, so unlink first; missing .1
-    // is fine (no previous rotation).
+    // POSIX 下 rename 会静默覆盖旧的 `.1`；Windows 下如果目标存在则会失败，
+    // 所以先 unlink。若 `.1` 不存在也没关系，说明之前还没轮转过。
     try {
       fsSync.unlinkSync(LOG_FILE_OLD)
     } catch {
-      /* no previous rotation — fine */
+      /* 之前没有轮转文件，属于正常情况 */
     }
     fsSync.renameSync(LOG_FILE, LOG_FILE_OLD)
-    // Rename succeeded — the active file is gone, the new one will be
-    // freshly opened by ensureLogReady() with byte count 0.
+    // rename 成功后，旧活动文件已经被移走；新的活动文件会在 ensureLogReady()
+    // 中重新创建并以 0 字节重新计数。
     currentLogBytes = 0
   } catch {
-    // Rotation failed (file locked on Windows, FS full, permission
-    // error, etc.). The active file is still on disk at its old size —
-    // resetting `currentLogBytes = 0` here would desync the in-memory
-    // counter from reality and the next rotation wouldn't fire until
-    // ANOTHER MAX_LOG_BYTES had been appended (file ~2× cap before
-    // we try again). Use the -1 sentinel so ensureLogReady() re-stats
-    // the file and resumes accurate accounting.
+    // 轮转失败时（例如 Windows 文件被占用、磁盘满、权限不足），
+    // 活动文件仍然以旧大小留在磁盘上。如果这里强行把
+    // `currentLogBytes = 0`，内存计数就会和真实文件大小脱节，
+    // 导致下次要等再写入一个完整的 `MAX_LOG_BYTES` 才会再次尝试轮转，
+    // 文件体积可能冲到上限的近 2 倍。这里改回 `-1` 哨兵值，
+    // 让 `ensureLogReady()` 下次重新 `stat`，恢复准确计数。
     currentLogBytes = -1
   }
 }
 
-/** Truncate `s` to at most `maxBytes` UTF-8 bytes, appending a marker noting
- *  how many bytes were dropped. The cheap `length * 4` upper bound short-
- *  circuits the common ASCII case (most debug content) without paying for
- *  Buffer.byteLength on every line.
+/** 把字符串 `s` 截断到最多 `maxBytes` 个 UTF-8 字节，并附带一个标记，
+ *  说明丢弃了多少字节。前面的 `length * 4` 是廉价上界判断，
+ *  能让最常见的 ASCII 场景（大多数调试内容）快速返回，
+ *  避免每一行都调用 `Buffer.byteLength`。
  *
- *  Slicing happens in BYTES, not JS chars: `s.slice(0, n)` would walk
- *  UTF-16 code units, so for CJK / emoji content it'd return ~3-4× the
- *  intended byte budget — debug lines mixing Chinese / Japanese / emoji
- *  would routinely overflow MAX_LINE_BYTES. We encode once, byte-slice,
- *  then re-decode (TextDecoder turns a cut-mid-codepoint tail into U+FFFD
- *  which the truncation marker absorbs).
- */
+ *  这里按“字节”而不是 JS 字符数截断：`s.slice(0, n)` 处理的是 UTF-16
+ *  代码单元，对中日韩文字和 emoji 会严重低估真实 UTF-8 大小，
+ *  返回内容可能超出预期 3 到 4 倍，最终突破 `MAX_LINE_BYTES`。
+ *  所以这里会先编码为字节流，再按字节切片，最后重新解码。
+ *  如果恰好切在一个多字节字符中间，`TextDecoder` 会把残缺尾部处理成 U+FFFD，
+ *  而这个占位符会被后面的截断标记自然覆盖语义。 */
 export function truncateForLog(s: string, maxBytes: number): string {
   if (s.length * 4 <= maxBytes) return s
   const buf = Buffer.from(s, 'utf8')
@@ -134,19 +133,21 @@ export function truncateForLog(s: string, maxBytes: number): string {
   return `${truncated}…<+${droppedBytes}b truncated>`
 }
 
-/** Narrow opt-in: when set by the CLI's `--plugin-debug` flag (or
- *  `XC_PLUGIN_DEBUG=1`), debugLog also mirrors lines tagged with one of
- *  the plugin-related prefixes to stderr, so the user can watch plugin
- *  / hook / marketplace activity live without `DEBUG_STDOUT=1`'s firehose.
- *  Kept as module state instead of an arg to debugLog so existing call
- *  sites don't need touching. */
+/** 一个更窄的调试开关：当 CLI 通过 `--plugin-debug`（或
+ *  `XC_PLUGIN_DEBUG=1`）开启后，`debugLog` 会把带有插件相关前缀的日志
+ *  同步镜像到 stderr。这样用户无需打开 `DEBUG_STDOUT=1` 的全量洪流，
+ *  也能实时看到 plugin / hook / marketplace 活动。
+ *  这里把它保存在模块状态中，而不是塞进 `debugLog` 参数，
+ *  是为了不去改动现有调用点。 */
 let pluginDebugMirror = false
 const PLUGIN_DEBUG_TAG_PREFIXES = ['plugins.', 'plugin.', 'hooks.', 'marketplace.']
 
+/** 控制是否把插件相关调试日志镜像输出到 stderr。 */
 export function setPluginDebugMirror(enabled: boolean): void {
   pluginDebugMirror = enabled
 }
 
+/** 判断一个日志标签是否属于插件相关分类。 */
 function isPluginRelatedTag(tag: string): boolean {
   for (const p of PLUGIN_DEBUG_TAG_PREFIXES) {
     if (tag.startsWith(p)) return true
@@ -154,15 +155,16 @@ function isPluginRelatedTag(tag: string): boolean {
   return false
 }
 
+/** 写入调试日志，并在需要时把插件相关日志镜像到 stderr。 */
 export function debugLog(tag: string, content: string): void {
   const mirrorToStderr = pluginDebugMirror && isPluginRelatedTag(tag)
   if (!DEBUG && !mirrorToStderr) return
   try {
     const safeContent = truncateForLog(content, MAX_LINE_BYTES)
     const ts = new Date().toISOString()
-    // `JSON.stringify(content)` quotes newlines/tabs so the full payload
-    // lands on ONE line in the log — much easier to grep across turns,
-    // and multi-line text-deltas don't visually merge with neighbours.
+    // `JSON.stringify(content)` 会把换行和制表符转义掉，
+    // 这样整段 payload 会稳定地落在同一行里，更方便跨轮次 `grep`，
+    // 也避免多行文本和相邻日志在视觉上粘连。
     const line = `[${ts}] ${tag} ${JSON.stringify(safeContent)}\n`
     if (DEBUG) {
       const bytes = Buffer.byteLength(line, 'utf8')
@@ -174,20 +176,20 @@ export function debugLog(tag: string, content: string): void {
       }
     }
     if (mirrorToStderr) {
-      // Use the raw fd to avoid Node's stderr stream buffering — we want
-      // each line to appear immediately even if the agent loop is busy.
+      // 直接写入原始 fd，绕过 Node stderr stream 的缓冲，
+      // 这样即便 agent loop 正忙，每行日志也能立刻显示出来。
       try {
         fsSync.writeSync(2, line)
       } catch {
-        // stderr write failure shouldn't crash the agent
+        // stderr 镜像失败不应该让 agent 崩掉
       }
     }
   } catch {
-    // best effort — never crash the agent just because we can't log
+    // 尽力而为即可，绝不能因为写日志失败而让 agent 崩溃
   }
 }
 
-/** Check if a file exists */
+/** 检查指定文件是否存在。 */
 export async function fileExists(filePath: string): Promise<boolean> {
   try {
     await fs.access(filePath)
@@ -197,7 +199,7 @@ export async function fileExists(filePath: string): Promise<boolean> {
   }
 }
 
-/** Read a file safely, return empty string on error */
+/** 安全读取文件内容；如果失败则返回空字符串。 */
 export async function readFileSafe(filePath: string): Promise<string> {
   try {
     return await fs.readFile(filePath, 'utf-8')
@@ -206,7 +208,7 @@ export async function readFileSafe(filePath: string): Promise<string> {
   }
 }
 
-/** Read and parse a JSON file, return null on error */
+/** 安全读取并解析 JSON 文件；如果失败则返回 `null`。 */
 export async function readJsonSafe(filePath: string): Promise<Record<string, unknown> | null> {
   try {
     const content = await fs.readFile(filePath, 'utf-8')

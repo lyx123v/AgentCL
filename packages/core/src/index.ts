@@ -1,6 +1,6 @@
-// @x-code-cli/core — Public API exports
+// @x-code-cli/core — 对外公开的 API 导出
 
-// Types
+// 类型
 export type {
   PermissionLevel,
   PermissionMode,
@@ -21,11 +21,11 @@ export type {
 export { MODEL_ALIASES, PROVIDER_DETECTION_ORDER, PROVIDER_KEY_URLS, PROVIDER_MODELS } from './types/index.js'
 export type { ProviderModel } from './types/index.js'
 
-// Config
+// 配置
 export { resolveModelId, getAvailableProviders, getEnvVarName, loadUserConfig, saveUserConfig } from './config/index.js'
 export type { UserConfig } from './config/index.js'
 
-// Provider Registry
+// Provider 注册表
 export { createModelRegistry } from './providers/registry.js'
 
 // Agent
@@ -48,16 +48,16 @@ export type { FileKind, FileReference, IngestedPart } from './agent/file-ingest.
 export { captionImage, pickVisionProvider } from './agent/vision-fallback.js'
 export type { VisionProvider } from './agent/vision-fallback.js'
 
-// Provider capabilities
+// Provider 能力
 export { capabilitiesOf, providerOf } from './providers/capabilities.js'
 export type { ProviderCapabilities } from './providers/capabilities.js'
 
-// Tools
+// 工具
 export { toolRegistry, truncateToolResult } from './tools/index.js'
 export { getShellProvider } from './tools/shell-provider.js'
 export type { ShellProvider, ShellType } from './tools/shell-provider.js'
 
-// Permissions
+// 权限
 export { checkPermission, getPermissionLevel } from './permissions/index.js'
 export { addSessionAllowRule, clearSessionRules, buildAllowRule } from './permissions/index.js'
 export {
@@ -69,26 +69,26 @@ export {
 export { loadPersistedRules, persistRule } from './permissions/index.js'
 export type { AllowRule } from './permissions/session-store.js'
 
-// Utils
+// 工具函数
 export { USER_XCODE_DIR, XCODE_DIR, debugLog, setPluginDebugMirror } from './utils.js'
 export { LruCache } from './utils/lru-cache.js'
 export { mediaTypeFor } from './utils/media-type.js'
 export { extractText } from './utils/message-helpers.js'
 
-// Knowledge
+// 知识上下文
 export { buildKnowledgeContext } from './knowledge/loader.js'
 export { getAutoMemory, initMemories } from './knowledge/auto-memory.js'
 export { generateSessionSummary } from './knowledge/session.js'
 
-// Sub-agents
+// 子 Agent
 export { createSubAgentRegistry, createBuiltInRegistry, SubAgentRegistry } from './agent/sub-agents/index.js'
 export type { SubAgentDefinition, SubAgentEvent, SubAgentTrace } from './agent/sub-agents/index.js'
 
-// File-based slash commands (plugin-contributed `commands/*.md`).
+// 基于文件的斜杠命令（来自插件贡献的 `commands/*.md`）。
 export { CommandRegistry, createCommandRegistry, loadPluginCommands, expandCommandBody } from './commands/index.js'
 export type { CommandDefinition, LoadCommandsOptions } from './commands/index.js'
 
-// Hooks — agent lifecycle event subsystem driven by plugin contributions.
+// Hooks：由插件贡献驱动的 agent 生命周期事件子系统。
 export {
   HookBus,
   emptyHookBus,
@@ -114,7 +114,7 @@ export type {
   SessionContext as HookSessionContext,
 } from './hooks/types.js'
 
-// Plugins — discovery, install, marketplace, registry.
+// 插件：发现、安装、市场、注册表。
 export { loadAllPlugins, resolveContributions } from './plugins/loader.js'
 export type {
   LoadOptions as PluginLoadOptions,
@@ -186,7 +186,7 @@ export type {
 } from './plugins/types.js'
 export { discoverManifest, parseManifest, ManifestParseError } from './plugins/manifest.js'
 
-// Skills
+// 技能
 export {
   SkillRegistry,
   createSkillRegistry,
@@ -198,8 +198,8 @@ export type { SkillDefinition, SkillEntry, SkillReloadSummary } from './skills/r
 export { getScopedDisabledSkills, setSkillDisabled, skillSettingsPath } from './skills/settings.js'
 export type { SkillSettingsScope } from './skills/settings.js'
 
-// Session store (per-session jsonl transcript — used by /resume,
-// /usage history, and the CLI startup --resume / --continue flags).
+// 会话存储（按会话保存 jsonl 记录，用于 /resume、
+// /usage history，以及 CLI 启动时的 --resume / --continue）。
 export {
   appendCheckpoint,
   appendInterrupted,
@@ -213,11 +213,11 @@ export {
 } from './agent/session-store.js'
 export type { LoadedSession, SessionListEntry } from './agent/session-store.js'
 
-// Rewind snapshots — file-history backing for /rewind.
+// Rewind 快照：为 /rewind 提供文件历史支撑。
 export { createCheckpoint, restoreCheckpoint } from './agent/snapshot.js'
 export type { CheckpointEntry } from './agent/snapshot.js'
 
-// MCP — Model Context Protocol client support.
+// MCP：Model Context Protocol 客户端支持。
 export { McpRegistry, emptyRegistry } from './mcp/registry.js'
 export type {
   RegisteredServer,

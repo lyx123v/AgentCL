@@ -1,8 +1,7 @@
-// @x-code-cli/core — Sub-agent runner
+// @x-code-cli/core — 子代理执行器
 //
-// Executes a sub-agent as a nested agentLoop with isolated context.
-// The parent agent receives only the final text result; intermediate
-// tool calls and messages stay inside the child loop.
+// 以嵌套 agentLoop 的方式执行子代理，并为它提供隔离上下文。
+// 父代理只能拿到最终文本结果；中间的工具调用和消息都留在子循环内部。
 import type { LanguageModel } from 'ai'
 
 import { resolveModelId } from '../../config/index.js'
@@ -17,9 +16,9 @@ import { buildSubAgentSystemPrompt } from '../system-prompt.js'
 import type { SubAgentRegistry } from './registry.js'
 import type { SubAgentDefinition } from './types.js'
 
-/** Fire a SubagentStart / SubagentStop hook. Best effort — sub-agent
- *  invocation is mandatory once the parent decides to delegate, so hook
- *  failures and aborts must never bubble. */
+/** 触发 SubagentStart / SubagentStop hook。
+ *  这是尽力而为的行为；一旦父代理决定委派，子代理执行就是必要步骤，
+ *  因此 hook 的失败或中止绝不能继续向外冒泡。 */
 function emitSubAgentHook(
   bus: HookBus | undefined,
   event: HookEvent & { name: 'SubagentStart' | 'SubagentStop' },
@@ -30,27 +29,27 @@ function emitSubAgentHook(
 }
 
 export interface RunSubAgentArgs {
-  parentState: LoopState
-  parentOptions: AgentOptions
-  callbacks: AgentCallbacks
-  toolCallId: string
-  agentName: string
-  description: string
-  prompt: string
-  knowledgeContext: string
-  isGitRepo: boolean
+  parentState: LoopState // 父代理当前的循环状态
+  parentOptions: AgentOptions // 父代理执行选项
+  callbacks: AgentCallbacks // 与父代理共用的回调集合
+  toolCallId: string // 触发本次子代理的工具调用 id
+  agentName: string // 要运行的子代理名称
+  description: string // 本次委派任务描述
+  prompt: string // 发送给子代理的完整提示词
+  knowledgeContext: string // 注入子代理 system prompt 的知识上下文
+  isGitRepo: boolean // 当前工作目录是否为 Git 仓库
 }
 
 export interface RunSubAgentResult {
-  resultText: string
-  tokenUsage: TokenUsage
-  turnCount: number
-  toolCallCount: number
-  durationMs: number
-  aborted: boolean
+  resultText: string // 返回给父代理的最终文本
+  tokenUsage: TokenUsage // 本次子代理消耗的 Token 统计
+  turnCount: number // 子代理实际执行轮数
+  toolCallCount: number // 子代理触发的工具调用次数
+  durationMs: number // 总耗时（毫秒）
+  aborted: boolean // 是否由中断导致结束
 }
 
-/** Extract the last assistant text from a message array (skipping tool-call parts). */
+/** 从消息数组中提取最后一段 assistant 文本，忽略 tool-call 片段。 */
 function extractFinalText(messages: LoopState['messages']): string {
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i]
@@ -68,6 +67,7 @@ function extractFinalText(messages: LoopState['messages']): string {
   return ''
 }
 
+/** 解析子代理应使用的模型，必要时回退到父代理模型。 */
 function resolveSubModel(
   agentDef: SubAgentDefinition,
   parentOptions: AgentOptions,
@@ -82,24 +82,25 @@ function resolveSubModel(
   try {
     return parentOptions.modelRegistry.languageModel(resolvedId as `${string}:${string}`)
   } catch {
-    debugLog('sub-agent.model', `Failed to resolve model "${agentDef.model}", falling back to parent model`)
+    debugLog('sub-agent.model', `解析模型 "${agentDef.model}" 失败，回退到父代理模型`)
     return parentModel
   }
 }
 
+/** 根据子代理定义和父代理权限模式构建工具过滤器。 */
 function buildToolFilter(agentDef: SubAgentDefinition, parentPermissionMode: string) {
   const deny = [...(agentDef.disallowedTools ?? []), 'task']
 
-  // In plan mode, deny write tools for general-purpose agent
+  // 在 plan 模式下，general-purpose 子代理不允许使用写入类工具。
   if (parentPermissionMode === 'plan' && agentDef.name === 'general-purpose') {
     deny.push('writeFile', 'edit')
   }
 
-  // `'*'` is a wildcard meaning "every tool" — matches Claude Code's
-  // `tools: ['*']` semantics for built-in/general-purpose agents. Pass
-  // `undefined` so `buildTools` skips the allowlist filter and only the
-  // explicit deny list applies. Without this, `['*']` would be treated
-  // as a literal tool name and every real tool would be filtered out.
+  // `'*'` 是“所有工具”的通配符，对齐 Claude Code 中
+  // `tools: ['*']` 的语义，供内置 general-purpose agent 使用。
+  // 这里传 `undefined`，这样 `buildTools` 会跳过 allowlist 过滤，
+  // 只应用明确的 deny 列表。否则 `['*']` 会被当成字面量工具名，
+  // 进而把所有真实工具都错误过滤掉。
   const allow = agentDef.tools?.includes('*') ? undefined : agentDef.tools
 
   return {
@@ -108,8 +109,8 @@ function buildToolFilter(agentDef: SubAgentDefinition, parentPermissionMode: str
   }
 }
 
-/** Resolve the model to use for the sub-agent. Need the actual LanguageModel
- *  instance from the parent since we pass it to agentLoop. */
+/** 运行子代理。
+ *  这里需要父代理当前的 LanguageModel 实例，因为它会直接传给 agentLoop。 */
 export async function runSubAgent(args: RunSubAgentArgs, parentModel: LanguageModel): Promise<RunSubAgentResult> {
   const {
     parentState,
@@ -127,7 +128,7 @@ export async function runSubAgent(args: RunSubAgentArgs, parentModel: LanguageMo
   const registry = parentOptions.subAgentRegistry as SubAgentRegistry | undefined
   if (!registry) {
     return {
-      resultText: '[Sub-agent system not initialized]',
+      resultText: '[子代理系统尚未初始化]',
       tokenUsage: zeroUsage(),
       turnCount: 0,
       toolCallCount: 0,
@@ -140,7 +141,7 @@ export async function runSubAgent(args: RunSubAgentArgs, parentModel: LanguageMo
   if (!agentDef) {
     const available = registry.names().join(', ')
     return {
-      resultText: `[Sub-agent '${agentName}' not found. Available: ${available}]`,
+      resultText: `[未找到子代理 '${agentName}'。可用子代理：${available}]`,
       tokenUsage: zeroUsage(),
       turnCount: 0,
       toolCallCount: 0,
@@ -149,7 +150,7 @@ export async function runSubAgent(args: RunSubAgentArgs, parentModel: LanguageMo
     }
   }
 
-  // Notify UI
+  // 通知 UI：子代理开始执行。
   callbacks.onSubAgentEvent?.({
     kind: 'start',
     toolCallId,
@@ -158,8 +159,8 @@ export async function runSubAgent(args: RunSubAgentArgs, parentModel: LanguageMo
     prompt,
   })
 
-  // Plugin hook: SubagentStart — fires after the agent definition is
-  // resolved but before the nested agentLoop runs. Best-effort.
+  // 插件 hook：SubagentStart。在 agent 定义解析完成后、
+  // 嵌套 agentLoop 运行前触发；失败不会阻止主流程。
   emitSubAgentHook(
     parentOptions.hookBus,
     {
@@ -192,12 +193,12 @@ export async function runSubAgent(args: RunSubAgentArgs, parentModel: LanguageMo
     abortSignal: parentOptions.abortSignal,
     permissionMode: 'default',
     printMode: false,
-    // Sub-agents don't get their own sub-agent registry — recursion is forbidden
+    // 子代理不会再拿到自己的子代理注册表，避免递归调用。
     subAgentRegistry: undefined,
   }
 
-  // Build sub-agent callbacks: forward events to the parent UI via onSubAgentEvent,
-  // but don't mix child state into parent state directly.
+  // 构建子代理回调：通过 onSubAgentEvent 把事件转发给父级 UI，
+  // 但不要把子代理内部状态直接混进父代理状态。
   const subCallbacks: AgentCallbacks = {
     onTextDelta: (delta) => {
       callbacks.onSubAgentEvent?.({ kind: 'text-delta', toolCallId, delta })
@@ -209,7 +210,7 @@ export async function runSubAgent(args: RunSubAgentArgs, parentModel: LanguageMo
         subToolName,
         subInput,
       })
-      // Also forward to parent's onToolProgress so the live indicator updates
+      // 同时转发给父代理的 onToolProgress，保证实时状态提示能刷新。
       callbacks.onToolProgress(toolCallId, `${subToolName}: ${previewInput(subInput)}`)
     },
     onToolProgress: (_subToolCallId, message) => {
@@ -246,7 +247,7 @@ export async function runSubAgent(args: RunSubAgentArgs, parentModel: LanguageMo
     const finalText = extractFinalText(finalSubState.messages)
     const toolUseCount = countToolCalls(finalSubState.messages)
 
-    // Accumulate sub-agent token usage into parent
+    // 将子代理的 Token 消耗累计回父代理。
     parentState.tokenUsage.inputTokens += finalSubState.tokenUsage.inputTokens
     parentState.tokenUsage.outputTokens += finalSubState.tokenUsage.outputTokens
     parentState.tokenUsage.totalTokens = parentState.tokenUsage.inputTokens + parentState.tokenUsage.outputTokens
@@ -255,7 +256,7 @@ export async function runSubAgent(args: RunSubAgentArgs, parentModel: LanguageMo
     callbacks.onUsageUpdate(parentState.tokenUsage)
 
     const durationMs = Date.now() - startTime
-    const resultText = finalText || '[Sub-agent completed without producing a final response]'
+    const resultText = finalText || '[子代理已完成，但没有生成最终回复]'
 
     callbacks.onSubAgentEvent?.({
       kind: 'end',
@@ -285,11 +286,11 @@ export async function runSubAgent(args: RunSubAgentArgs, parentModel: LanguageMo
     )
 
     if (turnCount >= agentDef.maxTurns && !finalText) {
-      // finalText is guaranteed empty here (the !finalText branch) and the
-      // messages array hasn't been mutated since line 246's call, so the
-      // partial-output value can only ever be 'none' on this path.
+      // 这里进入的是 !finalText 分支，因此 finalText 一定为空；
+      // 且自上方提取后 messages 没再发生变化，所以 partial-output
+      // 在这条路径上只能是 'none'。
       return {
-        resultText: `[Sub-agent reached max turns (${agentDef.maxTurns}) without finishing. Partial output: none]`,
+        resultText: `[子代理达到最大轮数 (${agentDef.maxTurns}) 后仍未完成。部分输出：无]`,
         tokenUsage: finalSubState.tokenUsage,
         turnCount,
         toolCallCount: toolUseCount,
@@ -309,18 +310,17 @@ export async function runSubAgent(args: RunSubAgentArgs, parentModel: LanguageMo
   } catch (err) {
     const durationMs = Date.now() - startTime
 
-    // agentLoop catches abort/error internally and returns normally with
-    // an outcome marker, so this catch only fires when something throws
-    // past those guards (usually setup-phase code: knowledge load, slug
-    // generation, etc.). At that point the sub-agent hasn't really
-    // executed any turns, so reporting 0 is honest.
+    // agentLoop 通常会在内部兜住 abort/error，并带着 outcome 正常返回。
+    // 因此这里只有在某些异常穿透这些保护时才会进入，通常发生在准备阶段
+    //（例如知识加载、slug 生成等）。这时子代理其实还没真正跑起来，
+    // 所以把 turnCount 记为 0 是准确的。
     const fallbackTurnCount = 0
 
     if (isAbortError(err, parentOptions.abortSignal)) {
       const partial = extractFinalText(subState.messages)
       const text = partial
-        ? `[Sub-agent interrupted by user]\n\nPartial output:\n${partial}`
-        : '[Sub-agent interrupted by user]'
+        ? `[子代理已被用户中断]\n\n部分输出：\n${partial}`
+        : '[子代理已被用户中断]'
       const toolUseCount = countToolCalls(subState.messages)
 
       callbacks.onSubAgentEvent?.({
@@ -362,7 +362,7 @@ export async function runSubAgent(args: RunSubAgentArgs, parentModel: LanguageMo
     callbacks.onSubAgentEvent?.({
       kind: 'end',
       toolCallId,
-      finalText: `[Sub-agent failed: ${message}]`,
+      finalText: `[子代理执行失败：${message}]`,
       tokenUsage: subState.tokenUsage,
       turnCount: fallbackTurnCount,
       durationMs,
@@ -382,7 +382,7 @@ export async function runSubAgent(args: RunSubAgentArgs, parentModel: LanguageMo
     )
 
     return {
-      resultText: `[Sub-agent failed: ${message}]`,
+      resultText: `[子代理执行失败：${message}]`,
       tokenUsage: subState.tokenUsage,
       turnCount: fallbackTurnCount,
       toolCallCount: toolUseCount,
@@ -392,6 +392,7 @@ export async function runSubAgent(args: RunSubAgentArgs, parentModel: LanguageMo
   }
 }
 
+/** 判断错误是否属于用户中断或 AbortSignal 触发的取消。 */
 function isAbortError(err: unknown, signal: AbortSignal | undefined): boolean {
   if (signal?.aborted) return true
   if (err instanceof Error) {
@@ -401,6 +402,7 @@ function isAbortError(err: unknown, signal: AbortSignal | undefined): boolean {
   return false
 }
 
+/** 生成一份全零的 Token 使用统计，用作失败回退值。 */
 function zeroUsage(): TokenUsage {
   return {
     inputTokens: 0,
@@ -412,6 +414,7 @@ function zeroUsage(): TokenUsage {
   }
 }
 
+/** 统计消息列表中包含了多少次工具调用。 */
 function countToolCalls(messages: LoopState['messages']): number {
   let count = 0
   for (const msg of messages) {
@@ -423,6 +426,7 @@ function countToolCalls(messages: LoopState['messages']): number {
   return count
 }
 
+/** 生成工具输入的简短预览，供父级进度提示显示。 */
 function previewInput(input: Record<string, unknown>): string {
   const val =
     (input.filePath as string) ??

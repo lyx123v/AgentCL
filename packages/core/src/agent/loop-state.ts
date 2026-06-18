@@ -1,99 +1,62 @@
-// @x-code-cli/core — Shared agent loop state
+// @x-code-cli/core — 共享的 agent 循环状态
 import type { ModelMessage } from 'ai'
 
 import type { PermissionMode, TodoItem, TokenUsage } from '../types/index.js'
 import type { CheckpointEntry } from './snapshot.js'
 
 export interface LoopState {
+  /** 当前会话累计的消息列表。 */
   messages: ModelMessage[]
+  /** 当前会话累计的 token 用量统计。 */
   tokenUsage: TokenUsage
-  /** Real input-token count from the most recent API response, used to trigger compression. */
+  /** 最近一次 API 响应返回的真实输入 token 数，用于判断是否触发压缩。 */
   lastInputTokens: number
+  /** 当前会话 id。 */
   sessionId: string
+  /** 会话启动时间（ISO 字符串）。 */
   startedAt: string
+  /** 本会话中被修改过的文件集合。 */
   filesModified: Set<string>
-  /** Rolling record of recently executed tool calls, keyed by a hash of the
-   *  tool name + stable-stringified input. Used by the doom-loop guard to
-   *  detect when the model is looping on the same failing call. */
+  /** 最近执行过的工具调用滚动记录。
+   *  用于 loop guard 检测模型是否在重复同一失败调用。 */
   recentToolCalls: Array<{ toolName: string; hash: string }>
-  /** Cached system prompt text — rebuilt once per session so the prefix
-   *  stays byte-stable across turns, enabling automatic prefix-caching on
-   *  OpenAI-compatible providers (DeepSeek, Moonshot, Alibaba, …).
-   *  Invalidated (set to null) on `permissionMode` change so the next turn
-   *  rebuilds it with / without the plan-mode overlay. */
+  /** 缓存后的 system prompt 文本。
+   *  设计目标是保持跨轮次字节级稳定，以便兼容 OpenAI 风格前缀缓存。 */
   systemPromptCache: string | null
-  /** Current approval mode — flips between 'default' and 'plan' via
-   *  the /plan slash command (user) or the enterPlanMode/exitPlanMode
-   *  tools (model). Read by tool-execution to decide which system
-   *  prompt overlay applies and which tools are advertised. */
+  /** 当前权限模式。
+   *  会在默认模式、计划模式和接受编辑模式之间切换。 */
   permissionMode: PermissionMode
-  /** Path to the plan file when in plan mode (`.x-code/plans/{sessionId}.md`),
-   *  null otherwise. Created lazily the first time the model calls
-   *  `enterPlanMode` and re-used for the remainder of that plan-mode
-   *  session. Cleared on exit. */
+  /** 当前计划文件路径。
+   *  仅在计划模式下存在，退出计划模式后会被清空。 */
   currentPlanPath: string | null
-  /** Lowercase-hyphen slug derived from the user's first message, used
-   *  to give session-usage files a human-skimmable name (mirrors how
-   *  plan files are named). Empty string when the first message had no
-   *  ASCII content (e.g. CJK-only) — session file then falls back to
-   *  pure timestamp. Set ONCE on the first agentLoop turn and never
-   *  changed; renaming mid-session would orphan the previous turn's
-   *  on-disk usage file. */
+  /** 从用户首条消息派生出的任务 slug。
+   *  用于生成更易读的会话与计划文件名。 */
   taskSlug: string
-  /** Current checklist maintained by the model via the `todoWrite`
-   *  tool. Full-replacement semantics — every todoWrite call rewrites
-   *  this array. In-memory only, never persisted. Auto-cleared back
-   *  to [] when the model submits a list with all items completed.
-   *  Cleared on `/clear` and `/resume` (the new LoopState starts
-   *  fresh with []); preserved across `/compact` so a multi-step
-   *  task survives history summarisation. */
+  /** 当前待办清单。
+   *  由 `todoWrite` 全量改写，仅保存在内存中。 */
   todos: TodoItem[]
-  /** Per-user-message snapshots backing the `/rewind` command. Pushed by
-   *  `createCheckpoint` (snapshot.ts) right after each user message lands
-   *  in `messages`. In-memory: ring-buffered at 100 entries. Cleared by
-   *  `markBoundaryAndReflush` — compaction rewrites the message array
-   *  in place, invalidating every prior `messageCount` anchor. Persisted
-   *  to the jsonl as `meta:checkpoint` lines; the loader's
-   *  "everything-after-last-boundary wins" rule naturally drops pre-
-   *  compaction entries on resume. */
+  /** `/rewind` 命令依赖的检查点列表。
+   *  每次用户消息进入 `messages` 后会追加一个快照。 */
   checkpoints: CheckpointEntry[]
-  /** Number of messages already persisted to the session jsonl file.
-   *  The agent loop calls `flushPendingMessages` at turn boundaries,
-   *  which appends `state.messages.slice(persistedMessageCount)` and
-   *  bumps the counter. Reset to `state.messages.length` after any
-   *  compaction (light or deep) — those rewritten messages get
-   *  re-flushed after a `compact-boundary` line so the loader's
-   *  "everything-after-last-boundary wins" rule reconstructs the same
-   *  in-memory state on resume. See `agent/session-store.ts`. */
+  /** 已经持久化到会话 jsonl 文件中的消息数量。 */
   persistedMessageCount: number
 
-  // ── Cache break detection ──
+  // ── 缓存命中异常检测 ──
 
-  /** Per-turn cache-read token count from the previous turn. Used to
-   *  detect unexpected cache misses (e.g. a code change that broke
-   *  system prompt byte-stability). */
+  /** 上一轮的 cache-read token 数，用于检测意外 cache miss。 */
   prevTurnCacheRead: number
-  /** When true, the next turn's cache-read drop is expected (e.g. after
-   *  compaction or permissionMode change) and should not trigger a
-   *  warning. Automatically cleared after one turn. */
+  /** 标记下一轮 cache miss 是否属于预期行为。 */
   expectCacheMiss: boolean
 
-  // ── Sub-agent support (set once in agentLoop, read by tool-execution) ──
+  // ── Sub-agent 支持字段（在 agentLoop 中设置，由 tool-execution 读取） ──
 
-  /** Cached knowledge context for sub-agent system prompts. Set once in
-   *  agentLoop after buildKnowledgeContext resolves; transparent to
-   *  sub-agent loops (they don't call buildKnowledgeContext themselves). */
+  /** 缓存后的知识上下文，供 sub-agent 的 system prompt 复用。 */
   knowledgeContext?: string
-  /** Whether cwd is a git repo. Cached for sub-agent system prompts. */
+  /** 当前工作目录是否是 git 仓库。 */
   isGitRepo?: boolean
 }
 
-/** Generate a human-skimmable session id: `YYYYMMDD-HHMMSS-mmm` (local
- *  time, milliseconds tail for uniqueness across rapid successive
- *  starts). Replaces the old `Date.now().toString(36)` (`mohbm95d`)
- *  which was unreadable in `ls .x-code/sessions/` — the timestamp shape
- *  matches plan-file naming so the two directory listings sort and
- *  scan the same way. */
+/** 生成更易读的会话 id：`YYYYMMDD-HHMMSS-mmm`。 */
 function generateSessionId(now: Date = new Date()): string {
   const pad = (n: number, w = 2) => String(n).padStart(w, '0')
   return (
@@ -103,6 +66,7 @@ function generateSessionId(now: Date = new Date()): string {
   )
 }
 
+/** 创建一份全新的循环状态对象，作为 agent 会话的初始内存。 */
 export function createLoopState(initialMode: PermissionMode = 'default'): LoopState {
   return {
     messages: [],
@@ -121,10 +85,8 @@ export function createLoopState(initialMode: PermissionMode = 'default'): LoopSt
     recentToolCalls: [],
     systemPromptCache: null,
     permissionMode: initialMode,
-    // Plan path is derived LAZILY from the user's task text once a
-    // message lands — done in agentLoop / enterPlanMode handler. We
-    // can't slugify here because the user's intent isn't visible at
-    // session-construction time.
+    // 计划文件路径会在真正拿到用户任务文本后再惰性推导，
+    // 因为创建 LoopState 时还看不到用户意图。
     currentPlanPath: null,
     taskSlug: '',
     todos: [],

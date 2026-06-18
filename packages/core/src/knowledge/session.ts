@@ -1,31 +1,26 @@
-// @x-code-cli/core — LLM-generated session summaries (used by the agent
-// loop's deep compaction path).
+// @x-code-cli/core — 由 LLM 生成的会话摘要（供 agent loop 的深度压缩路径使用）
 //
-// What used to live here: `saveSessionSummary` + `loadLatestSession`,
-// which wrote `<sessionId>.json` and `latest.json` into
-// `.x-code/sessions/`. Both are gone — the full session transcript now
-// lives in a single `.jsonl` per session (see `agent/session-store.ts`),
-// and compaction summaries are embedded as `compact-boundary` meta lines
-// inside that same jsonl. One file per session, no out-of-band siblings.
+// 这里过去曾经放过：`saveSessionSummary` 与 `loadLatestSession`，
+// 它们会把 `<sessionId>.json` 和 `latest.json` 写入 `.x-code/sessions/`。
+// 现在它们都已经移除——完整会话记录改为每个会话一个 `.jsonl`
+// （见 `agent/session-store.ts`），而压缩摘要则以内嵌的
+// `compact-boundary` 元数据行形式保存在同一个 jsonl 里。
+// 也就是说，现在是“一次会话一个文件”，不再有额外的旁路兄弟文件。
 //
-// What remains: `generateSessionSummary` — a small isolated `generateText`
-// call that the loop invokes when context overflows and needs to be
-// compressed into a paragraph. The result is fed to `markBoundaryAndReflush`
-// (in session-store) and also wrapped into a "[Previous conversation
-// summary]" user message that replaces the discarded prefix in
-// `state.messages`.
+// 这里现在保留下来的只有 `generateSessionSummary`：这是一个独立且很小的
+// `generateText` 调用，会在上下文溢出、需要把旧内容压缩成一段摘要时由
+// loop 触发。结果会被送进 `markBoundaryAndReflush`（位于 session-store），
+// 同时也会包装成一条 `"[Previous conversation summary]"` 用户消息，
+// 用来替换 `state.messages` 中被丢弃的那段前缀内容。
 import { generateText } from 'ai'
 import type { LanguageModel, ModelMessage } from 'ai'
 
 import type { SessionSummary } from '../types/index.js'
 
-/** Number of recent messages to include when generating session summaries */
+/** 生成会话摘要时要纳入的最近消息数量。 */
 const SESSION_SUMMARY_MESSAGE_COUNT = 20
 
-/** Generate a session summary from messages using the model. Returns the
- *  full structured `SessionSummary` (title + status + key results +
- *  pendingWork + decisions) — callers typically want the `summary` field
- *  for context replacement and the rest for picker / display purposes. */
+/** 使用模型基于消息生成会话摘要。返回完整结构化的 `SessionSummary`（title + status + keyResults + pendingWork + decisions）；调用方通常会把 `summary` 用于上下文替换，而其余字段则用于选择器或展示层。 */
 export async function generateSessionSummary(
   messages: ModelMessage[],
   model: LanguageModel,
@@ -40,15 +35,15 @@ export async function generateSessionSummary(
     messages: [
       {
         role: 'system',
-        content: `Summarize this conversation as a structured JSON object with these fields:
-- title: short descriptive title (string)
-- summary: 2-3 sentence overview (string)
-- keyResults: what was accomplished (string[])
-- pendingWork: what remains to be done (string[])
-- decisions: important decisions made (string[])
+        content: `请将这段对话总结为一个结构化 JSON 对象，字段如下：
+- title: 简短且有描述性的标题（string）
+- summary: 2-3 句概述（string）
+- keyResults: 已完成的结果（string[]）
+- pendingWork: 尚未完成的工作（string[]）
+- decisions: 已做出的重要决策（string[]）
 - status: "completed" | "in_progress" | "abandoned"
 
-Return ONLY valid JSON, no markdown fencing.`,
+只返回合法 JSON，不要使用 markdown 代码块围栏。`,
       },
       ...messages.slice(-SESSION_SUMMARY_MESSAGE_COUNT),
     ],
@@ -61,7 +56,7 @@ Return ONLY valid JSON, no markdown fencing.`,
       startedAt,
       endedAt: new Date().toISOString(),
       filesModified,
-      title: parsed.title ?? 'Untitled session',
+      title: parsed.title ?? '未命名会话',
       summary: parsed.summary ?? '',
       keyResults: parsed.keyResults ?? [],
       pendingWork: parsed.pendingWork ?? [],
@@ -73,7 +68,7 @@ Return ONLY valid JSON, no markdown fencing.`,
       id: sessionId,
       startedAt,
       endedAt: new Date().toISOString(),
-      title: 'Session',
+      title: '会话',
       summary: text.slice(0, 200),
       keyResults: [],
       pendingWork: [],

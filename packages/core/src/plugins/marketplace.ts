@@ -1,31 +1,29 @@
-// @x-code-cli/core — Marketplace subscription + index parsing
+// @x-code-cli/core — Marketplace 订阅与索引解析
 //
-// A marketplace is a curated catalog of plugins (its `marketplace.json`
-// is a list of `{ name, source, ... }` entries). The CLI doesn't host
-// its own marketplace — see [[plugin-marketplace-design]] §7.1 for the
-// "subscribe to others" rationale. This module:
+// marketplace 是一个经过整理的插件目录（其 `marketplace.json` 本质上就是
+// 一组 `{ name, source, ... }` 条目的列表）。CLI 本身不维护官方 marketplace，
+// 而是支持“订阅外部 marketplace”；原因可见 [[plugin-marketplace-design]] §7.1。
+// 本模块主要负责：
 //
-//   1. Reads + writes `known_marketplaces.json` (the user's subscription
-//      list) with reserved-name protection.
-//   2. Fetches and caches marketplace indexes from either an HTTPS URL
-//      pointing to the raw marketplace.json or a git URL (we clone
-//      shallow and read `.claude-plugin/marketplace.json`, which is the
-//      path real Claude Code marketplaces publish at).
-//   3. Parses marketplace.json into a typed `Marketplace`, normalising
-//      each plugin's `source` field from the on-disk wire form
-//      (string shortcut, `git-subdir`, `url`, …) into our internal
-//      `PluginSource` so the installer only deals with one shape.
-//   4. Looks up `name@marketplace` plugin ids → install sources.
+//   1. 读写 `known_marketplaces.json`（用户订阅列表），并对保留名称做保护。
+//   2. 从 HTTPS 原始 `marketplace.json` 地址，或 git 地址中拉取并缓存
+//      marketplace 索引（git 场景下会浅克隆仓库并读取
+//      `.claude-plugin/marketplace.json`，这是实际 Claude Code
+//      marketplace 常见的发布路径）。
+//   3. 把 marketplace.json 解析为强类型 `Marketplace`，并把其中每个插件条目的
+//      `source` 从落盘线格式（字符串简写、`git-subdir`、`url` 等）统一归一化
+//      为内部 `PluginSource`，让 installer 只处理一种结构。
+//   4. 根据 `name@marketplace` 形式的插件 id 反查实际安装来源。
 //
-// Wire format vs internal `PluginSource`: the real Claude Code spec
-// uses `source` as the discriminator with values `'git-subdir'`,
-// `'url'`, etc., plus a plain string shortcut for monorepo subdirs
-// (`"./plugins/foo"`). We map all of those to `PluginSource` so the
-// rest of the system can stay on one shape. See
-// [[normalizeMarketplaceSource]] for the conversion table.
+// 线格式与内部 `PluginSource` 的差异：
+// 真正的 Claude Code 规范使用 `source` 作为判别字段，取值可能是
+// `'git-subdir'`、`'url'` 等，也支持用字符串简写 monorepo 子目录
+// （如 `"./plugins/foo"`）。这里会把它们全部映射成 `PluginSource`，
+// 保证系统其余部分只面对一种内部结构。转换规则见
+// [[normalizeMarketplaceSource]]。
 //
-// All disk + network I/O accepts an AbortSignal so Esc cancellations
-// from the agent loop propagate cleanly.
+// 所有磁盘与网络 IO 都接收 AbortSignal，这样 agent loop 中按 Esc 的取消操作
+// 就能顺畅向下传递。
 import { execa } from 'execa'
 
 import fs from 'node:fs/promises'
@@ -38,23 +36,21 @@ import { debugLog } from '../utils.js'
 import { knownMarketplacesPath, marketplaceDir, marketplaceIndexPath } from './paths.js'
 import type { KnownMarketplace, KnownMarketplaces, Marketplace, MarketplaceEntry, PluginSource } from './types.js'
 
-// ── Reserved marketplace names ──────────────────────────────────────────
+// ── 保留的 marketplace 名称 ───────────────────────────────────────────
 
-/** Names that may only be registered if their source matches the canonical
- *  upstream. Prevents a malicious actor from publishing
- *  `anthropic-marketplace` from their own repo and impersonating Anthropic.
- *  Maps to expected GitHub org. */
+/** 只能在来源匹配官方上游时才允许注册的 marketplace 名称。
+ *  这样可以防止恶意方在自己的仓库里伪造 `anthropic-marketplace`
+ *  之类的名称来冒充官方来源。值为期望的 GitHub 组织名。 */
 export const RESERVED_MARKETPLACE_NAMES: Readonly<Record<string, string>> = {
   'anthropic-marketplace': 'anthropics',
   'claude-plugins': 'anthropics',
   'x-code-official': 'woai3c',
 }
 
-// ── Source normalisation (wire format → internal PluginSource) ──────────
+// ── 来源归一化（线格式 → 内部 PluginSource） ──────────────────────────
 
-/** Convert a marketplace `source` field (in its on-disk wire form) into
- *  our internal `PluginSource`. Supports every shape we've seen in real
- *  Claude Code marketplaces:
+/** 把 marketplace 中的 `source` 字段（落盘线格式）转换为内部 `PluginSource`。
+ *  支持我们在真实 Claude Code marketplace 中见过的各种形态：
  *
  *  | Wire form                                                   | Normalised PluginSource                          |
  *  |-------------------------------------------------------------|--------------------------------------------------|
@@ -68,17 +64,15 @@ export const RESERVED_MARKETPLACE_NAMES: Readonly<Record<string, string>> = {
  *  | `{source:'local', path}`                                    | `{kind:'local', path}`                           |
  *  | `{kind:'git'\|'github'\|'local', …}` (our legacy form)       | passes through                                   |
  *
- *  The relative-string form (`./plugins/foo`) needs the marketplace's
- *  own clone URL — that's the repo we'll subdir into. Passed in via
- *  `ctx.marketplaceCloneUrl`. Throws when the string is relative but
- *  no context was provided (HTTPS-fetched marketplaces can't host
- *  relative-path plugins for obvious reasons).
+ *  相对路径字符串（如 `./plugins/foo`）需要依赖 marketplace 自身的 clone URL，
+ *  因为最终要进入的是该仓库的某个子目录。这个值通过 `ctx.marketplaceCloneUrl`
+ *  传入。如果 source 是相对路径但上下文里没有 clone URL，则会抛错；
+ *  从原始 HTTPS 地址直接拉取的 marketplace 天然无法承载相对路径插件。
  *
- *  The `sha` field from `git-subdir` / `url` / `github` is captured into
- *  `PluginSource.expectedSha` (7-40 hex, format-validated below) and used
- *  by the installer's post-clone `git rev-parse HEAD` integrity check —
- *  see installer.ts's `fetchToTemp` sha check. Non-hex / malformed values
- *  are silently dropped so a typo doesn't masquerade as a real mismatch. */
+ *  `git-subdir` / `url` / `github` 里的 `sha` 字段会被提取为
+ *  `PluginSource.expectedSha`（要求 7-40 位十六进制，并在下方校验格式），
+ *  供 installer 在克隆后通过 `git rev-parse HEAD` 做完整性检查。
+ *  非十六进制或格式错误的值会被静默忽略，避免把单纯的拼写错误误当成真实篡改。 */
 export function normalizeMarketplaceSource(raw: unknown, ctx: { marketplaceCloneUrl?: string } = {}): PluginSource {
   if (typeof raw === 'string') {
     if (raw.startsWith('./') || raw.startsWith('../')) {
@@ -106,10 +100,9 @@ export function normalizeMarketplaceSource(raw: unknown, ctx: { marketplaceClone
     const o = raw as Record<string, unknown>
     const disc = (typeof o.source === 'string' ? o.source : (o.kind as string | undefined)) as string | undefined
 
-    // Capture the optional `sha` integrity pin. We accept it as a hex
-    // string ≥7 chars (matches Git's short-sha tolerance; the installer
-    // does a prefix compare so a short sha still works). Reject non-hex
-    // shapes early — a typo'd value would otherwise mask a real attack.
+    // 提取可选的 `sha` 完整性钉住值。这里接受长度不少于 7 的十六进制字符串，
+    // 与 Git 对短 sha 的容忍度一致；installer 会做前缀比较，因此短 sha 也可用。
+    // 对非十六进制内容尽早拒绝，避免一个拼错的值掩盖真实攻击。
     const rawSha = typeof o.sha === 'string' ? o.sha.trim().toLowerCase() : undefined
     const expectedSha = rawSha && /^[0-9a-f]{7,40}$/.test(rawSha) ? rawSha : undefined
 
@@ -140,10 +133,9 @@ export function normalizeMarketplaceSource(raw: unknown, ctx: { marketplaceClone
       }
     }
     if (disc === 'github') {
-      // Two real-world shapes for github sources:
-      //   { owner, repo, ref?, subdir? } — separate owner / repo
-      //   { repo: "owner/repo" } — combined slash-form (seen in real
-      //                            claude-plugins-official entries)
+      // github 来源在真实世界里常见两种形态：
+      //   { owner, repo, ref?, subdir? }：owner / repo 分字段
+      //   { repo: "owner/repo" }：合并成斜杠形式
       let owner = typeof o.owner === 'string' ? o.owner : undefined
       let repo = typeof o.repo === 'string' ? o.repo : undefined
       if (!owner && repo && repo.includes('/')) {
@@ -176,12 +168,11 @@ export function normalizeMarketplaceSource(raw: unknown, ctx: { marketplaceClone
   throw new Error('source must be a string or object')
 }
 
-// ── Zod schemas for marketplace.json ────────────────────────────────────
+// ── marketplace.json 的 Zod schema ────────────────────────────────────
 
-// `source` is validated as "string OR object" at the zod layer; the real
-// shape check happens inside `normalizeMarketplaceSource` because the
-// union has too many discriminator forms (some use `source`, some use
-// `kind`) for zod's discriminated union to handle cleanly.
+// 在 zod 层，`source` 只会先校验成“字符串或对象”；
+// 真正的结构识别交给 `normalizeMarketplaceSource`，因为这个联合类型的判别形式太多：
+// 有的用 `source`，有的用 `kind`，不适合直接用 zod 的 discriminated union。
 const wireSourceSchema = z.union([z.string().min(1), z.record(z.string(), z.unknown())])
 
 const wireEntrySchema = z.object({
@@ -193,8 +184,8 @@ const wireEntrySchema = z.object({
   version: z.string().optional(),
   homepage: z.string().optional(),
   keywords: z.array(z.string()).optional(),
-  // Real Claude Code plugin entries also carry top-level `author`. Not
-  // currently part of MarketplaceEntry but accept to avoid rejecting.
+  // 真实的 Claude Code 插件条目还可能带顶层 `author`。
+  // 它暂时不属于 MarketplaceEntry，但这里依然接受，避免因额外字段而拒绝解析。
   author: z.unknown().optional(),
 })
 
@@ -216,7 +207,7 @@ const wireMarketplaceSchema = z.object({
 export class MarketplaceParseError extends Error {
   constructor(
     message: string,
-    public readonly sourceLabel: string,
+    public readonly sourceLabel: string, // 发生解析错误的 marketplace 标识，通常是订阅别名
   ) {
     super(message)
     this.name = 'MarketplaceParseError'
@@ -224,17 +215,12 @@ export class MarketplaceParseError extends Error {
 }
 
 export interface ParseMarketplaceContext {
-  /** The git clone URL of the marketplace's own repo, used to resolve
-   *  relative-string sources like `"./plugins/foo"`. Absent when the
-   *  marketplace was fetched from a raw HTTPS URL (those can't host
-   *  relative plugins). */
-  marketplaceCloneUrl?: string
+  marketplaceCloneUrl?: string // marketplace 自身仓库的 git clone URL；用于解析 `./plugins/foo` 这类相对来源
 }
 
-/** Parse + validate a marketplace.json string and normalise every
- *  plugin's `source` into our internal `PluginSource`. `sourceLabel` is
- *  included in error messages so the user knows which marketplace
- *  failed. */
+/** 解析并校验 marketplace.json 字符串，同时把每个插件的 `source`
+ *  归一化成内部 `PluginSource`。`sourceLabel` 会写进错误信息，
+ *  便于用户知道是哪一个 marketplace 解析失败。 */
 export function parseMarketplace(raw: string, sourceLabel: string, ctx: ParseMarketplaceContext = {}): Marketplace {
   let json: unknown
   try {
@@ -265,9 +251,8 @@ export function parseMarketplace(raw: string, sourceLabel: string, ctx: ParseMar
         source,
       })
     } catch (err) {
-      // One bad plugin entry doesn't kill the marketplace — most users
-      // care about other plugins in the catalog. Collect and surface in
-      // a single error AFTER trying every entry.
+      // 单个坏掉的插件条目不应该拖垮整个 marketplace，
+      // 因为大多数用户依然关心目录中的其他插件。这里先收集错误，等所有条目都尝试完再统一上报。
       sourceErrors.push(`plugins.${i} (${entry.name}): ${err instanceof Error ? err.message : String(err)}`)
     }
   }
@@ -278,13 +263,11 @@ export function parseMarketplace(raw: string, sourceLabel: string, ctx: ParseMar
     debugLog('plugins.marketplace-source-errors', `${sourceLabel}: ${sourceErrors.join(' | ')}`)
   }
 
-  // `name` is the subscription alias the caller passed (sourceLabel),
-  // not the upstream marketplace.json `name` field. Storage paths, install
-  // ids, and lookups all key off the alias — having `parseMarketplace`
-  // leak the upstream name through here is what caused `plugin marketplace
-  // info <alias>` to fail and `plugin search` to tag plugins with the
-  // wrong marketplace. We preserve the upstream name on `upstreamName` so
-  // `info` can still show it when it differs.
+  // 这里的 `name` 必须是调用方传入的订阅别名（sourceLabel），而不是上游
+  // marketplace.json 自己声明的 `name`。因为存储路径、安装 id、查找逻辑
+  // 全都以“别名”为准。如果把上游名字泄漏进来，就会导致
+  // `plugin marketplace info <alias>` 失败，`plugin search` 也会给插件打上错误 marketplace。
+  // 为了兼顾展示，我们把上游自报名称保存在 `upstreamName` 中。
   return {
     schemaVersion: result.data.schemaVersion ?? '1',
     name: sourceLabel,
@@ -296,15 +279,16 @@ export function parseMarketplace(raw: string, sourceLabel: string, ctx: ParseMar
   }
 }
 
-// ── known_marketplaces.json: read / write ───────────────────────────────
+// ── known_marketplaces.json：读 / 写 ──────────────────────────────────
 
-/** Fresh empty state. Function (not const) so each call returns a fresh
- *  `marketplaces: []` — a shared constant would let one caller's mutation
- *  leak into the next caller's "empty" result. */
+/** 返回一个全新的空状态。
+ *  之所以写成函数而不是常量，是为了保证每次都得到新的 `marketplaces: []`，
+ *  避免某个调用方的修改意外污染下一次的“空结果”。 */
 function freshKnown(): KnownMarketplaces {
   return { marketplaces: [] }
 }
 
+/** 读取已知 marketplace 订阅列表；文件不存在或损坏时返回空状态。 */
 export async function readKnownMarketplaces(): Promise<KnownMarketplaces> {
   const file = knownMarketplacesPath()
   try {
@@ -328,17 +312,18 @@ export async function readKnownMarketplaces(): Promise<KnownMarketplaces> {
   }
 }
 
+/** 把已知 marketplace 订阅列表写回磁盘，并尽量保留文件中本模块不认识的其他字段。 */
 async function writeKnownMarketplaces(km: KnownMarketplaces): Promise<void> {
   const file = knownMarketplacesPath()
   await fs.mkdir(path.dirname(file), { recursive: true })
-  // Read-modify-write so any unrelated future fields aren't clobbered.
+  // 采用“先读再改再写”，避免把未来新增但当前模块不认识的字段直接覆盖掉。
   let existing: Record<string, unknown> = {}
   try {
     const raw = await fs.readFile(file, 'utf-8')
     const parsed = JSON.parse(raw) as unknown
     if (parsed && typeof parsed === 'object') existing = parsed as Record<string, unknown>
   } catch {
-    // first write
+    // 首次写入时文件还不存在
   }
   existing.marketplaces = km.marketplaces
   if (km.strictKnownMarketplaces !== undefined) existing.strictKnownMarketplaces = km.strictKnownMarketplaces
@@ -346,23 +331,20 @@ async function writeKnownMarketplaces(km: KnownMarketplaces): Promise<void> {
   await fs.writeFile(file, JSON.stringify(existing, null, 2) + '\n', 'utf-8')
 }
 
-/** Ensure the default marketplace subscriptions exist. Called from CLI
- *  startup so a fresh install lands with Anthropic's official
- *  marketplace pre-subscribed and `/plugin search` returns hits without
- *  the user having to manually add anything. Idempotent — never
- *  overwrites an existing entry, so a user who removed the
- *  subscription stays unsubscribed.
+/** 确保默认 marketplace 订阅存在。
+ *  该函数会在 CLI 启动时调用，使全新安装默认预订阅 Anthropic 官方 marketplace，
+ *  这样用户不手动添加也能直接通过 `/plugin search` 搜到结果。
+ *  该操作是幂等的，不会覆盖已有条目；如果用户自己删掉过订阅，也不会被强行补回。
  *
- *  Target is `anthropics/claude-plugins-official` (203 plugins) rather
- *  than the smaller bundled marketplace in `anthropics/claude-code`
- *  itself — the dedicated repo is the canonical discovery surface. */
+ *  默认目标是 `anthropics/claude-plugins-official`，而不是
+ *  `anthropics/claude-code` 仓库里较小的内置 marketplace，因为前者才是官方主发现入口。 */
 export async function ensureDefaultMarketplaces(): Promise<void> {
   const km = await readKnownMarketplaces()
   const haveAnthropic = km.marketplaces.some((m) => m.name === 'anthropic-marketplace')
   if (haveAnthropic) return
 
-  // Use addKnownMarketplace so the reserved-name check fires — it
-  // sets `reservedName: true` + `officialSource: 'anthropics'`.
+  // 通过 addKnownMarketplace 进入，这样保留名称校验也会一起触发，
+  // 并自动补上 `reservedName: true` 与 `officialSource: 'anthropics'`。
   try {
     await addKnownMarketplace({
       name: 'anthropic-marketplace',
@@ -373,10 +355,9 @@ export async function ensureDefaultMarketplaces(): Promise<void> {
   }
 }
 
-/** Register a new marketplace subscription. Rejects reserved names whose
- *  source doesn't match the canonical upstream — see
- *  RESERVED_MARKETPLACE_NAMES. Idempotent: re-adding the same name
- *  updates the source. */
+/** 注册一个新的 marketplace 订阅。
+ *  如果命中了保留名称，但来源并非其官方上游，就会拒绝注册。
+ *  该操作是幂等的：重复添加相同名称时会更新其来源。 */
 export async function addKnownMarketplace(entry: KnownMarketplace): Promise<void> {
   const reservedOrg = RESERVED_MARKETPLACE_NAMES[entry.name]
   if (reservedOrg !== undefined) {
@@ -400,6 +381,7 @@ export async function addKnownMarketplace(entry: KnownMarketplace): Promise<void
   await writeKnownMarketplaces(km)
 }
 
+/** 删除一个 marketplace 订阅；若不存在则返回 `noop`。 */
 export async function removeKnownMarketplace(name: string): Promise<'removed' | 'noop'> {
   const km = await readKnownMarketplaces()
   const before = km.marketplaces.length
@@ -409,8 +391,9 @@ export async function removeKnownMarketplace(name: string): Promise<'removed' | 
   return 'removed'
 }
 
+/** 判断 marketplace 来源是否属于期望的 GitHub 组织。 */
 function sourceMatchesOrg(source: string, expectedOrg: string): boolean {
-  // Accepts `github:org/repo[...]` and `https://github.com/org/repo[...]`.
+  // 支持 `github:org/repo[...]` 与 `https://github.com/org/repo[...]` 两种形式。
   const ghShort = source.match(/^github:([^/]+)\//i)
   if (ghShort) return ghShort[1]!.toLowerCase() === expectedOrg.toLowerCase()
   const ghHttps = source.match(/^https?:\/\/github\.com\/([^/]+)\//i)
@@ -418,25 +401,22 @@ function sourceMatchesOrg(source: string, expectedOrg: string): boolean {
   return false
 }
 
-// ── Fetch / refresh a marketplace index ─────────────────────────────────
+// ── 拉取 / 刷新 marketplace 索引 ──────────────────────────────────────
 
 export interface FetchOptions {
-  signal?: AbortSignal
-  /** Skip network if a cached index exists and is younger than this. */
-  maxAgeMs?: number
+  signal?: AbortSignal // 用于取消网络和子进程 IO 的 AbortSignal
+  maxAgeMs?: number // 如果本地缓存存在且足够新，则跳过网络请求
 }
 
-/** Pull a fresh marketplace.json into the local cache and parse it.
- *  Supports two source shapes:
+/** 拉取最新 marketplace.json，写入本地缓存，并完成解析。
+ *  支持两种来源形式：
  *
- *    - `https://...` or `http://...`  — direct URL to marketplace.json
- *    - anything else (`github:owner/repo`, git URL)  — shallow clone,
- *      then read `.claude-plugin/marketplace.json` (the canonical
- *      Claude Code path — see `anthropics/claude-code` and
- *      `anthropics/claude-plugins-official` for reference layouts)
+ *    - `https://...` 或 `http://...`：直接指向 marketplace.json 的地址
+ *    - 其他形式（`github:owner/repo`、git URL）：先浅克隆，再读取
+ *      `.claude-plugin/marketplace.json`
  *
- *  Writes the parsed file to ~/.x-code/plugins/marketplaces/<name>/marketplace.json
- *  before returning. */
+ *  返回前还会把原始文件写入
+ *  `~/.x-code/plugins/marketplaces/<name>/marketplace.json`。 */
 export async function fetchMarketplace(entry: KnownMarketplace, opts: FetchOptions = {}): Promise<Marketplace> {
   const cachedPath = marketplaceIndexPath(entry.name)
 
@@ -461,19 +441,17 @@ export async function fetchMarketplace(entry: KnownMarketplace, opts: FetchOptio
   return marketplace
 }
 
-/** Build the `ParseMarketplaceContext` from a known marketplace entry.
- *  For git-cloned marketplaces this provides the clone URL so plugin
- *  entries with relative-string sources like `"./plugins/foo"` resolve
- *  to that subdir of the marketplace's own repo. For raw-HTTPS
- *  marketplaces no clone URL exists; relative sources in such
- *  marketplaces fail to normalise (correctly — there's no repo to
- *  refer to). */
+/** 根据已知 marketplace 条目构造 `ParseMarketplaceContext`。
+ *  对 git 克隆型 marketplace，会提供 clone URL，便于将
+ *  `"./plugins/foo"` 这类相对来源解析为其自身仓库中的子目录。
+ *  对原始 HTTPS marketplace，则不存在 clone URL，因此相对来源会正确地解析失败。 */
 function contextForKnownEntry(entry: KnownMarketplace): ParseMarketplaceContext {
   const isRawHttps = /^https?:\/\//i.test(entry.source) && /\.json($|\?)/i.test(entry.source)
   if (isRawHttps) return {}
   return { marketplaceCloneUrl: resolveCloneUrl(entry.source) }
 }
 
+/** 判断某个缓存文件是否仍在有效期内。 */
 async function isFreshEnough(filePath: string, maxAgeMs: number): Promise<boolean> {
   try {
     const stat = await fs.stat(filePath)
@@ -483,6 +461,7 @@ async function isFreshEnough(filePath: string, maxAgeMs: number): Promise<boolea
   }
 }
 
+/** 通过 HTTP 拉取 marketplace.json 文本。 */
 async function fetchHttpJson(url: string, signal?: AbortSignal): Promise<string> {
   const res = await fetch(url, { signal })
   if (!res.ok) {
@@ -491,11 +470,9 @@ async function fetchHttpJson(url: string, signal?: AbortSignal): Promise<string>
   return res.text()
 }
 
-/** Clone the repo at the given source into a temp dir (depth 1) and
- *  return the contents of the marketplace index. Probes the canonical
- *  `.claude-plugin/marketplace.json` first and falls back to a
- *  root-level `marketplace.json` for non-standard layouts. The clone
- *  is removed before returning regardless of success. */
+/** 把指定来源的仓库浅克隆到临时目录，并返回 marketplace 索引内容。
+ *  会优先探测标准路径 `.claude-plugin/marketplace.json`，若不存在，
+ *  再回退到根目录 `marketplace.json`。无论成功失败，返回前都会删除临时克隆目录。 */
 async function fetchViaShallowClone(source: string, signal?: AbortSignal): Promise<string> {
   const cloneUrl = resolveCloneUrl(source)
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'xc-marketplace-'))
@@ -509,7 +486,7 @@ async function fetchViaShallowClone(source: string, signal?: AbortSignal): Promi
       try {
         return await fs.readFile(candidate, 'utf-8')
       } catch {
-        // try the next candidate
+        // 继续尝试下一个候选路径
       }
     }
     throw new Error(
@@ -517,14 +494,14 @@ async function fetchViaShallowClone(source: string, signal?: AbortSignal): Promi
     )
   } finally {
     await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {
-      /* best effort */
+      /* 尽力清理 */
     })
   }
 }
 
-/** Turn a source string into something `git clone` understands:
- *  `github:owner/repo` → `https://github.com/owner/repo.git`. Anything
- *  else is passed through (real git URLs, ssh:, etc.). */
+/** 把来源字符串转换成 `git clone` 可直接理解的地址。
+ *  例如 `github:owner/repo` 会变成 `https://github.com/owner/repo.git`；
+ *  其他形式（真实 git URL、ssh 等）则原样透传。 */
 export function resolveCloneUrl(source: string): string {
   const m = source.match(/^github:([^/]+)\/(.+?)(?:\.git)?$/i)
   if (m) {
@@ -533,12 +510,11 @@ export function resolveCloneUrl(source: string): string {
   return source
 }
 
-// ── Lookup helpers ──────────────────────────────────────────────────────
+// ── 查找辅助函数 ──────────────────────────────────────────────────────
 
-/** Read every cached marketplace index. Used by `/plugin search` and
- *  `/plugin install <name@marketplace>` lookups. Marketplaces with broken
- *  cached indexes are skipped + logged; one bad marketplace doesn't break
- *  the others. */
+/** 读取所有已缓存的 marketplace 索引。
+ *  供 `/plugin search` 与 `/plugin install <name@marketplace>` 查找使用。
+ *  如果某个 marketplace 的缓存损坏，会跳过并记录日志，而不会影响其他 marketplace。 */
 export async function readAllCachedMarketplaces(): Promise<Marketplace[]> {
   const km = await readKnownMarketplaces()
   const out: Marketplace[] = []
@@ -553,8 +529,8 @@ export async function readAllCachedMarketplaces(): Promise<Marketplace[]> {
   return out
 }
 
-/** Find one plugin entry by `name@marketplace` id. Returns `undefined`
- *  when the marketplace isn't subscribed or the plugin isn't listed. */
+/** 根据 `name@marketplace` id 查找单个插件条目。
+ *  当 marketplace 未订阅，或插件不在其列表中时，返回 `undefined`。 */
 export async function lookupPlugin(
   pluginId: string,
 ): Promise<{ marketplace: Marketplace; entry: MarketplaceEntry } | undefined> {

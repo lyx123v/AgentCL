@@ -1,44 +1,36 @@
-// @x-code-cli/core — Doom-loop circuit breaker
+// @x-code-cli/core — 循环调用熔断器
 //
-// Detects when the model is repeatedly making the same tool call with the
-// same arguments — usually because the previous call failed and the model's
-// next best idea is to try it again verbatim. On Windows we see this most
-// often with shell commands that fail for quoting reasons: the model tweaks
-// nothing and retries the exact same line 5–10 times, each failure padding
-// the context with a stack trace.
+// 这里用于检测模型是否在反复用完全相同的参数调用同一个工具。
+// 常见场景是上一次调用失败后，模型没换思路，原样重试多次，持续往上下文里
+// 塞入重复报错。
 //
-// Two stages:
-//   Stage 1 (soft, default threshold 3): inject a synthetic tool-result that
-//     tells the model "this exact call failed 3 times, stop and change your
-//     approach". The next turn sees the synthetic result and usually pivots.
-//   Stage 2 (hard, default threshold 5): abort the turn and prompt the user
-//     — 5 identical calls after the soft nudge means the nudge isn't helping
-//     and we should not pad another round of context.
+// 分两级：
+//   第 1 级（软阻断，默认阈值 3）：注入一条合成 tool-result，提示模型
+//   “这次相同调用已经失败 3 次，请换个思路”。
+//   第 2 级（硬阻断，默认阈值 5）：直接终止当前轮次并提示用户。
 //
-// Detection is by SHA256 over `{toolName, stableInputJson}`. Stable stringify
-// sorts object keys so `{a:1,b:2}` and `{b:2,a:1}` hash to the same value.
+// 检测方式是对 `{toolName, stableInputJson}` 做 SHA256。stable stringify
+// 会先对对象键排序，因此 `{a:1,b:2}` 和 `{b:2,a:1}` 会得到同一个哈希。
 //
-// Tuning note: we don't use opencode's "exactly 3 identical in a row"
-// predicate — that misses the case where the model tries `foo`, then reads a
-// file in between, then tries `foo` again. We instead look at the last N
-// tool calls of the same toolName and check if K of them share the hash.
+// 这里不使用“必须连续 3 次完全相同”的判断，因为模型可能会在两次相同调用之间
+// 插入一次 readFile 等无关操作。我们只看最近 N 次同名工具调用里，有多少条
+// 共享同一个哈希。
 import crypto from 'node:crypto'
 
 import type { LoopState } from './loop-state.js'
 import { toolResultMessage } from './messages.js'
 
-/** Tool calls at or above this count in the rolling window trigger the soft
- *  synthetic nudge. */
+/** 在滚动窗口内达到该次数后，触发软阻断提示。 */
 export const SOFT_LOOP_THRESHOLD = 3
 
-/** Tool calls at or above this count abort the turn and prompt the user. */
+/** 在滚动窗口内达到该次数后，直接硬阻断当前轮次。 */
 export const HARD_LOOP_THRESHOLD = 5
 
-/** Size of the rolling window we scan for duplicates. */
+/** 用于扫描重复调用的滚动窗口大小。 */
 export const LOOP_WINDOW_SIZE = 8
 
-/** Stable JSON stringify: sorts object keys deterministically so semantically
- *  identical inputs hash to the same value regardless of key order. */
+/** 稳定版 JSON stringify。
+ *  通过固定对象键顺序，保证语义相同的输入即使键顺序不同也会得到同一字符串。 */
 function stableStringify(value: unknown): string {
   if (value === null || typeof value !== 'object') return JSON.stringify(value)
   if (Array.isArray(value)) return '[' + value.map(stableStringify).join(',') + ']'
@@ -46,41 +38,31 @@ function stableStringify(value: unknown): string {
   return '{' + entries.map(([k, v]) => JSON.stringify(k) + ':' + stableStringify(v)).join(',') + '}'
 }
 
-/** Hash a tool call for duplicate detection. Truncated to 16 hex chars —
- *  collision probability at that length is vanishingly small for the 8-entry
- *  window we're comparing against. */
+/** 为工具调用生成用于去重检测的哈希值。
+ *  截断为 16 位十六进制已经足够覆盖当前窗口规模。 */
 export function hashToolCall(toolName: string, input: unknown): string {
   const payload = toolName + '\x00' + stableStringify(input)
   return crypto.createHash('sha256').update(payload).digest('hex').slice(0, 16)
 }
 
-/** Common header carrying the precomputed call hash. Threaded through the
- *  result so {@link recordToolCall} can reuse it instead of hashing twice. */
+/** 循环检测结果的公共基类，携带预先算好的调用哈希。 */
 interface LoopCheckBase {
+  /** 当前工具调用的稳定哈希。 */
   hash: string
 }
 
 export type LoopCheck =
-  /** No loop detected — dispatch this tool call normally. */
+  /** 未检测到循环，可正常执行工具。 */
   | (LoopCheckBase & { kind: 'ok' })
-  /** Loop detected at soft threshold — inject a synthetic tool-result that
-   *  tells the model to stop, and SKIP actually running the tool this round.
-   *  `toolCallId` is the id of the current call so the synthetic result
-   *  reads as the response to it. */
+  /** 达到软阻断阈值。
+   *  本轮不再真正执行工具，而是插入一条合成 tool-result 提示模型换思路。 */
   | (LoopCheckBase & { kind: 'soft-block'; toolCallId: string; message: string })
-  /** Loop detected at hard threshold — abort the turn and prompt the user. */
+  /** 达到硬阻断阈值，直接终止当前轮次。 */
   | (LoopCheckBase & { kind: 'hard-block'; toolName: string; message: string })
 
 /**
- * Check whether the incoming tool call is a duplicate of recent calls in the
- * window, and report what the caller should do. Does NOT mutate state — the
- * caller commits the hash via {@link recordToolCall} once the call proceeds.
- * The returned `hash` should be passed to `recordToolCall` to avoid a second
- * SHA256 of the same input.
- *
- * We only count matches that share the same hash AND the same toolName; a
- * fresh command with identical-looking args under a different tool never
- * triggers the guard.
+ * 检查当前工具调用是否和最近窗口中的历史调用重复，并告知调用方下一步该怎么做。
+ * 该函数本身不会修改 state；真正执行后应由 `recordToolCall` 记录结果。
  */
 export function checkForLoop(state: LoopState, toolName: string, input: unknown, toolCallId: string): LoopCheck {
   const hash = hashToolCall(toolName, input)
@@ -91,15 +73,14 @@ export function checkForLoop(state: LoopState, toolName: string, input: unknown,
     if (entry.toolName === toolName && entry.hash === hash) priorMatches++
   }
 
-  // The current incoming call is what pushes us over the threshold, so we
-  // compare against N-1 prior matches.
+  // 当前这次调用本身会把计数推高，所以这里比较的是历史命中数 + 1。
 
   if (priorMatches + 1 >= HARD_LOOP_THRESHOLD) {
     return {
       kind: 'hard-block',
       hash,
       toolName,
-      message: `Tool ${toolName} has been called with identical arguments ${priorMatches + 1} times in a row. The model is looping; aborting this turn.`,
+      message: `工具 ${toolName} 已用完全相同的参数重复调用 ${priorMatches + 1} 次，模型正在循环，本轮将被中止。`,
     }
   }
 
@@ -109,32 +90,28 @@ export function checkForLoop(state: LoopState, toolName: string, input: unknown,
       hash,
       toolCallId,
       message:
-        `This exact ${toolName} call (same arguments) has already been attempted ${priorMatches + 1} times this session with the same result. ` +
-        'DO NOT retry it. Change your approach — alter the arguments meaningfully, try a different tool, or ask the user what to do instead.',
+        `当前会话中，这个完全相同的 ${toolName} 调用（参数一致）已经尝试了 ${priorMatches + 1} 次，且结果没有变化。` +
+        '请不要继续原样重试。请改用新的思路，例如实质性修改参数、换一个工具，或直接询问用户下一步该怎么做。',
     }
   }
 
   return { kind: 'ok', hash }
 }
 
-/** Commit a tool call to the rolling window. Bound size so the array doesn't
- *  grow for long sessions. Pass the `hash` returned by {@link checkForLoop}
- *  to skip recomputing it; omit only when called outside the check path. */
+/** 把一次工具调用记录到滚动窗口中。
+ *  会限制数组长度，避免长会话里无限增长。 */
 export function recordToolCall(state: LoopState, toolName: string, input: unknown, hash?: string): void {
   const h = hash ?? hashToolCall(toolName, input)
   state.recentToolCalls.push({ toolName, hash: h })
-  // Keep 2x the window to give checkForLoop some history beyond the active
-  // comparison window (lets us tune LOOP_WINDOW_SIZE without changing the
-  // persistence footprint).
+  // 保留 2 倍窗口大小，既能给检测逻辑留出更多历史，又不会让持久化体积失控。
   const cap = LOOP_WINDOW_SIZE * 2
   if (state.recentToolCalls.length > cap) {
     state.recentToolCalls.splice(0, state.recentToolCalls.length - cap)
   }
 }
 
-/** Build a synthetic tool-result message telling the model the call was
- *  blocked by the loop guard. The model sees this as if the tool returned it
- *  and usually adjusts on the next turn. */
+/** 构造一条合成 tool-result，告诉模型本次调用被 loop guard 拦截了。
+ *  模型会把它当作工具返回结果来理解，并通常在下一轮调整策略。 */
 export function syntheticLoopBlockResult(toolName: string, toolCallId: string, message: string) {
   return toolResultMessage(toolCallId, toolName, `[loop-guard] ${message}`)
 }

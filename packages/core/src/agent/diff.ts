@@ -1,40 +1,44 @@
-// @x-code-cli/core — Edit-tool diff payload.
+// @x-code-cli/core — 编辑工具的 diff 负载。
 //
-// Computed by tool-execution after a successful writeFile / edit, and
-// emitted to the UI via AgentCallbacks.onFileEdit so the scrollback row
-// can render a colored diff block under the tool bullet (matching
-// Claude Code's `Update(file)` → `Added X lines, removed Y` view).
+// 在 writeFile / edit 成功后，由 tool-execution 计算并通过
+// AgentCallbacks.onFileEdit 发给 UI，让滚动区能在工具条目下渲染
+// 带颜色的 diff 区块。
 //
-// The model still sees only the short result string from executeWriteTool
-// (`File edited: ...`) — the diff payload is a UI-side side channel and
-// never round-trips through state.messages.
+// 模型本身看到的仍然只是 executeWriteTool 返回的短结果字符串
+// （例如 `File edited: ...`）；这个 diff 负载仅供 UI 使用，不会进入
+// state.messages 往返。
 import { structuredPatch } from 'diff'
 
-/** One contiguous diff hunk. Mirrors `diff` package's `StructuredPatchHunk`
- *  shape but redefined here so consumers don't need a `diff` peer dep just
- *  to type the payload. Each entry in `lines` carries a leading sigil
- *  character: `' '` (context), `'+'` (added), `'-'` (removed). */
+/** 一段连续的 diff hunk。
+ *  结构参考 `diff` 包的 `StructuredPatchHunk`，但这里重新定义一份，
+ *  这样消费方就不需要为了类型而额外依赖 `diff`。 */
 export interface EditDiffHunk {
+  /** 原文件中该 hunk 的起始行号。 */
   oldStart: number
+  /** 原文件中该 hunk 覆盖的行数。 */
   oldLines: number
+  /** 新文件中该 hunk 的起始行号。 */
   newStart: number
+  /** 新文件中该 hunk 覆盖的行数。 */
   newLines: number
+  /** hunk 的逐行内容，前缀分别表示上下文、新增、删除。 */
   lines: string[]
 }
 
 export interface EditDiffPayload {
+  /** 发生变更的文件路径。 */
   filePath: string
+  /** 结构化 diff 分块列表。 */
   hunks: EditDiffHunk[]
+  /** 新增行数。 */
   additions: number
+  /** 删除行数。 */
   removals: number
-  /** True when the file did not exist before the write — used by the UI to
-   *  flip the header from "Added X lines, removed Y" to "Created N lines"
-   *  and render a content preview instead of an (empty) hunk list. */
+  /** 文件在写入前是否不存在。
+   *  UI 会据此把标题从“新增 X 行，删除 Y 行”切换为“创建 N 行”。 */
   isCreate: boolean
-  /** Full new file content. Populated for create payloads so the UI can
-   *  render the first ~10 lines as a preview under the "Created N lines"
-   *  header (matching Claude Code's FileWriteToolCreatedMessage). Left
-   *  undefined for update payloads — there's already a hunk list to show. */
+  /** 新文件完整内容。
+   *  仅在创建文件时填充，便于 UI 显示前几行预览。 */
   content?: string
 }
 
@@ -42,11 +46,8 @@ const CONTEXT_LINES = 3
 const DIFF_TIMEOUT_MS = 5_000
 
 /**
- * Build a structured patch + counts for a single file change. Returns
- * `null` when no actual change was made (writeFile with identical content)
- * so callers can elide the diff display entirely. For brand-new files pass
- * `oldContent: null` — the helper still computes a hunk-less payload with
- * `additions = lineCount(newContent)`.
+ * 为单个文件变更构建结构化 patch 和增删统计。
+ * 如果内容前后完全相同，则返回 `null`，调用方可以直接跳过 diff 展示。
  */
 export function computeEditDiff(
   filePath: string,
@@ -71,10 +72,8 @@ export function computeEditDiff(
     timeout: DIFF_TIMEOUT_MS,
   })
 
-  // structuredPatch returns `false`-y on timeout. The change really did
-  // happen on disk; we just don't have a hunk view, so fall back to a
-  // counts-only summary derived line-by-line. Better than dropping the
-  // payload (UI would silently skip the diff block).
+  // structuredPatch 超时会返回假值。磁盘上的改动实际上已经发生，
+  // 只是拿不到 hunk 视图，因此退回到仅统计增删行数的摘要。
   const hunks: EditDiffHunk[] = result?.hunks ? result.hunks.map(toHunk) : []
 
   let additions = 0
@@ -87,10 +86,8 @@ export function computeEditDiff(
   }
 
   if (additions === 0 && removals === 0 && hunks.length === 0) {
-    // Timed-out diff with no hunks — count lines manually so the header
-    // still makes sense. Approximation: max(0, newLines - oldLines) added,
-    // and max(0, oldLines - newLines) removed. Not accurate for a pure
-    // replace, but honest given we couldn't compute a real diff.
+    // diff 超时且没有 hunk 时，手工估算增删行数，让标题至少有可展示内容。
+    // 这对纯替换场景不完全精确，但比完全丢失 diff 信息更实用。
     const oldLines = countLines(oldContent)
     const newLines = countLines(newContent)
     additions = Math.max(0, newLines - oldLines)
@@ -100,6 +97,7 @@ export function computeEditDiff(
   return { filePath, hunks, additions, removals, isCreate: false }
 }
 
+/** 把底层 diff hunk 转成当前模块导出的轻量结构。 */
 function toHunk(h: {
   oldStart: number
   oldLines: number
@@ -116,9 +114,8 @@ function toHunk(h: {
   }
 }
 
-/** Count visible lines, treating a single trailing `\n` as a terminator
- *  (matches how editors number lines: a 3-line file is 3 lines whether or
- *  not it ends in a newline). */
+/** 统计可见行数，并把单个末尾 `\n` 视作终止符处理。
+ *  这样和编辑器的行号语义一致：3 行文件无论末尾是否带换行，都算 3 行。 */
 function countLines(s: string): number {
   if (s.length === 0) return 0
   const parts = s.split('\n')

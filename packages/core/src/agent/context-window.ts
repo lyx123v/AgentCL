@@ -1,30 +1,25 @@
-// @x-code-cli/core — Context window lookup & estimation
+// @x-code-cli/core — 上下文窗口查询与估算
 import type { ModelMessage } from 'ai'
 
 /**
- * Compress context when usage exceeds this fraction of the model's context
- * window. Two checks use this:
- *   1. After each turn — based on the **real** input-token count reported by
- *      the API, which is the most reliable signal.
- *   2. Before each API call — based on a **character-based estimate** as a
- *      safety net. Estimates drift (tool output, non-ASCII), so we use a
- *      conservative multiplier. The estimate catches cases where a single
- *      turn (e.g. reading a huge file) pushes context past the limit before
- *      the real count is available.
+ * 当上下文使用量超过模型上下文窗口的这个比例时触发压缩。
+ * 这里会被两个检查点使用：
+ *   1. 每轮结束后：基于 API 返回的真实 input token 数，这是最可靠的信号。
+ *   2. 每次 API 调用前：基于字符长度做一次兜底估算。
  */
 export const COMPRESSION_TRIGGER_RATIO = 0.8
 
 /**
- * Rough chars-per-token ratio for pre-call estimation. Most English text is
- * ~4 chars/token; CJK and code can be lower. We use 3.0 (aggressive) so the
- * estimate over-counts slightly, making the safety net trigger earlier.
+ * 调用前估算时使用的粗略“每 token 字符数”比例。
+ * 英文通常约 4 chars/token，中文和代码往往更低；这里取 3.0，让估算略偏保守，
+ * 以便兜底机制更早触发。
  */
 const CHARS_PER_TOKEN_ESTIMATE = 3.0
 
-/** Default context window when both model- and provider-level lookups miss. */
+/** 当模型级和 provider 级查询都未命中时使用的默认上下文窗口。 */
 const DEFAULT_CONTEXT_WINDOW = 128000
 
-/** Context window sizes per model (tokens). */
+/** 各模型的上下文窗口大小（单位：token）。 */
 const MODEL_CONTEXT_WINDOWS: ReadonlyMap<string, number> = new Map([
   // Anthropic
   ['anthropic:claude-fable-5', 1000000],
@@ -47,9 +42,9 @@ const MODEL_CONTEXT_WINDOWS: ReadonlyMap<string, number> = new Map([
   // DeepSeek
   ['deepseek:deepseek-v4-flash', 1000000],
   ['deepseek:deepseek-v4-pro', 1000000],
-  // Alibaba — per DashScope docs: qwen-turbo and qwen3-coder-plus extend to 1M;
-  // qwen-max still caps at 32k (use qwen3-max for 256k). Values verified against
-  // https://help.aliyun.com/zh/model-studio/models.
+  // Alibaba：根据 DashScope 文档，qwen-turbo 和 qwen3-coder-plus 支持到 1M；
+  // qwen-max 仍然只有 32k（若需 256k 应使用 qwen3-max）。
+  // 数值已对照 https://help.aliyun.com/zh/model-studio/models 校验。
   ['alibaba:qwen3.7-max', 131072],
   ['alibaba:qwen-turbo', 1000000],
   ['alibaba:qwen-plus', 131072],
@@ -70,7 +65,7 @@ const MODEL_CONTEXT_WINDOWS: ReadonlyMap<string, number> = new Map([
   ['moonshotai:kimi-k2.5', 131072],
 ])
 
-/** Provider-level fallback context windows. */
+/** provider 级别的上下文窗口兜底值。 */
 const PROVIDER_CONTEXT_WINDOWS: ReadonlyMap<string, number> = new Map([
   ['anthropic', 1000000],
   ['openai', 128000],
@@ -82,7 +77,7 @@ const PROVIDER_CONTEXT_WINDOWS: ReadonlyMap<string, number> = new Map([
   ['moonshotai', 128000],
 ])
 
-/** Resolve context window (tokens) for a model id like `provider:model`. */
+/** 根据 `provider:model` 形式的模型 id 解析上下文窗口大小。 */
 export function getContextWindow(modelId: string): number {
   const exact = MODEL_CONTEXT_WINDOWS.get(modelId)
   if (exact !== undefined) return exact
@@ -90,27 +85,25 @@ export function getContextWindow(modelId: string): number {
   return PROVIDER_CONTEXT_WINDOWS.get(provider) ?? DEFAULT_CONTEXT_WINDOW
 }
 
-/** Token threshold above which we trigger compression for a given model. */
+/** 计算某个模型触发压缩的 token 阈值。 */
 export function getCompressionThreshold(modelId: string): number {
   return Math.floor(getContextWindow(modelId) * COMPRESSION_TRIGGER_RATIO)
 }
 
 /**
- * Per-model cap on max_tokens (reply size). Some providers reject requests
- * that exceed their ceiling rather than clamping silently.
- * For models without an explicit entry, we fall back to a high default that
- * the AI SDK will clamp for known providers.
+ * 各模型允许的 max_tokens 上限（即回复体积上限）。
+ * 某些 provider 超上限会直接拒绝请求，而不是静默裁剪。
  */
 const DEFAULT_MAX_OUTPUT_TOKENS = 16384
 const MODEL_MAX_OUTPUT_TOKENS: ReadonlyMap<string, number> = new Map([
-  // DeepSeek V4: both flash and pro advertise up to 384K output tokens.
-  // We cap at a generous but conservative 131072 to avoid edge-case 400s.
+  // DeepSeek V4：flash 和 pro 理论上都支持到 384K 输出 token。
+  // 这里保守限制在 131072，避免边缘情况下触发 400。
   ['deepseek:deepseek-v4-flash', 131072],
   ['deepseek:deepseek-v4-pro', 131072],
-  // Alibaba — qwen-turbo rejects anything above 16384; other Qwen3 models
-  // support 32768 (non-thinking) / 81920 (thinking mode). We cap at the
-  // non-thinking ceiling so the request always succeeds. qwen-max only has a
-  // 32k context window, so we keep its output ceiling well below that.
+  // Alibaba：qwen-turbo 超过 16384 会直接拒绝；其他 Qwen3 模型支持
+  // 32768（非 thinking）/ 81920（thinking）。这里统一卡在非 thinking
+  // 上限，保证请求始终可通过。qwen-max 只有 32k 上下文窗口，因此输出上限
+  // 也要明显低于它。
   ['alibaba:qwen-turbo', 16384],
   ['alibaba:qwen-plus', 32000],
   ['alibaba:qwen-max', 8192],
@@ -119,15 +112,14 @@ const MODEL_MAX_OUTPUT_TOKENS: ReadonlyMap<string, number> = new Map([
   ['alibaba:qwq-plus', 32000],
 ])
 
-/** Resolve the max_tokens ceiling we send to the provider. */
+/** 解析发送给 provider 的 max_tokens 上限。 */
 export function getMaxOutputTokens(modelId: string): number {
   return MODEL_MAX_OUTPUT_TOKENS.get(modelId) ?? DEFAULT_MAX_OUTPUT_TOKENS
 }
 
 /**
- * Estimate total token count from messages using character length.
- * This is intentionally conservative (over-counting) to serve as a safety net
- * that fires before the real API limit is hit.
+ * 基于消息字符数粗略估算总 token 数。
+ * 这里故意偏保守一些，用作真正 API 上限到来前的提前预警。
  */
 export function estimateTokenCount(messages: ModelMessage[]): number {
   let chars = 0

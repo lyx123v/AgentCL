@@ -1,4 +1,4 @@
-// @x-code-cli/core — Sub-agent barrel exports
+// @x-code-cli/core — 子代理模块聚合导出
 export type { SubAgentDefinition, SubAgentTrace, SubAgentEvent } from './types.js'
 export { builtInAgents } from './built-in.js'
 export { loadCustomAgents } from './loader.js'

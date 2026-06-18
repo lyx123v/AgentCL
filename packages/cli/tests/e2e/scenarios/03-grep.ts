@@ -3,13 +3,14 @@ import type { Scenario } from '../framework/types.js'
 const scenario: Scenario = {
   id: '03-grep',
   name: 'grep 工具按正则查内容并报告命中文件',
+  // 执行 grep 场景，验证模型会按指定文本检索并报告命中文件。
   async run(ctx) {
     await ctx.writeFile('src/foo.ts', 'export function uniqueMarkerForGrep(): void {}\n')
     await ctx.writeFile('src/bar.ts', 'export const hello = 1\n')
     await ctx.writeFile('README.md', 'no marker here\n')
 
     const r = await ctx.runCli(
-      'Use the grep tool to find every file that contains the literal string "uniqueMarkerForGrep" in this project. List the matching filename in your answer.',
+      '请使用 grep 工具，在这个项目中查找所有包含字面量字符串 "uniqueMarkerForGrep" 的文件，并在回答中列出命中的文件名。',
     )
     ctx.expect.exitCode(r, 0)
     // 必须用 uniqueMarkerForGrep 作为 pattern 调 grep — 否则模型可以 grep
@@ -19,7 +20,7 @@ const scenario: Scenario = {
     // 不依赖 assistant 文本（assistant 可能从 prompt/setup 推断 foo.ts）。
     ctx.expect.truthy(
       /foo\.ts/.test(grepCall.resultText ?? ''),
-      `grep resultText should report foo.ts as a hit; got:\n${(grepCall.resultText ?? '').slice(0, 300)}`,
+      `grep 的 resultText 应该报告 foo.ts 命中；实际内容为：\n${(grepCall.resultText ?? '').slice(0, 300)}`,
     )
     ctx.expect.assistantMentions(r, /foo\.ts/)
     ctx.expect.noToolErrors(r)

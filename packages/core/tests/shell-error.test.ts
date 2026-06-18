@@ -1,4 +1,4 @@
-// Tests for utils/shell-error.ts
+// utils/shell-error.ts 测试
 import { describe, expect, it } from 'vitest'
 
 import { foldShellErrorNoise } from '../src/utils/shell-error.js'
@@ -11,7 +11,7 @@ The string is missing the terminator: ".
     + FullyQualifiedErrorId : TerminatorExpectedAtEndOfString`
 
 describe('foldShellErrorNoise', () => {
-  it('folds a full PS error block into a single line', () => {
+  it('会把完整的 PowerShell 错误块折叠成单行摘要', () => {
     const out = foldShellErrorNoise(PS_ERROR_SAMPLE)
     const lines = out.split('\n').filter((l) => l.trim())
     expect(lines.length).toBeLessThanOrEqual(2)
@@ -21,7 +21,7 @@ describe('foldShellErrorNoise', () => {
     expect(out).not.toContain('FullyQualifiedErrorId')
   })
 
-  it('folds multiple consecutive blocks', () => {
+  it('会折叠多个连续出现的错误块', () => {
     const input = `${PS_ERROR_SAMPLE}\n${PS_ERROR_SAMPLE}`
     const out = foldShellErrorNoise(input)
     const atLineCount = (out.match(/At line:/g) ?? []).length
@@ -29,7 +29,7 @@ describe('foldShellErrorNoise', () => {
     expect(out).not.toContain('CategoryInfo')
   })
 
-  it('preserves non-error lines interleaved with blocks', () => {
+  it('在错误块之间穿插普通文本时，会保留普通文本', () => {
     const input = `before marker\n${PS_ERROR_SAMPLE}\nafter marker`
     const out = foldShellErrorNoise(input)
     expect(out).toContain('before marker')

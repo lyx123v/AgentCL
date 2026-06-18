@@ -3,6 +3,7 @@ import type { Scenario } from '../framework/types.js'
 const scenario: Scenario = {
   id: '10-task-subagent',
   name: 'task 工具委派给 explore 子 agent',
+  // 执行子代理场景，验证 task 会把探索任务委派给 explore 子代理。
   async run(ctx) {
     // 准备 3 个文件让子 agent 有东西可探索。
     // 文件名里嵌入只有读源码才能拿到的标识符（fmt / parseValue），
@@ -14,10 +15,9 @@ const scenario: Scenario = {
     await ctx.writeFile('package.json', '{"name":"demo"}\n')
 
     const r = await ctx.runCli(
-      'Use the `task` tool with the `explore` sub-agent type (subagent_type: "explore") to investigate ' +
-        'what utilities live in the src/utils/ directory. The sub-agent should look at each file and ' +
-        'return a short summary that names every exported identifier it finds. Then quote that summary ' +
-        'back to me verbatim in your final answer.',
+      '请使用 `task` 工具，并指定 `explore` 子代理类型（subagent_type: "explore"），去调查 ' +
+        'src/utils/ 目录里有哪些工具。子代理需要查看每个文件，并返回一段简短总结，点名它找到的每个导出标识符。' +
+        '最后请你在最终回答中原样引用这段总结。',
       { args: ['--trust', '--max-turns', '15'] },
     )
     ctx.expect.exitCode(r, 0)

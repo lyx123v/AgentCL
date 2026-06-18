@@ -1,9 +1,9 @@
 #!/usr/bin/env node
-// Minimal stdio MCP server used by integration tests. Implements just
-// enough of the protocol that McpClient can complete a handshake,
-// enumerate one tool, and round-trip a callTool / readResource.
+// 供集成测试使用的最小化 stdio MCP 服务端。
+// 它只实现了最基础的协议能力，让 McpClient 能完成握手、枚举工具，
+// 并往返执行一次 callTool / readResource。
 //
-// Wire format: newline-delimited JSON-RPC 2.0 on stdin/stdout. No batching.
+// 线协议格式：stdin/stdout 上按“每行一条”的方式传输 JSON-RPC 2.0，不支持批量请求。
 
 let buf = ''
 
@@ -23,18 +23,22 @@ process.stdin.on('data', (chunk) => {
   }
 })
 
+// 向 stdout 发送一条 JSON-RPC 消息。
 function send(msg) {
   process.stdout.write(JSON.stringify(msg) + '\n')
 }
 
+// 发送成功响应。
 function reply(id, result) {
   send({ jsonrpc: '2.0', id, result })
 }
 
+// 发送错误响应。
 function error(id, code, message) {
   send({ jsonrpc: '2.0', id, error: { code, message } })
 }
 
+// 根据 method 分发收到的请求。
 function handle(msg) {
   const { method, id, params } = msg
 
@@ -49,7 +53,7 @@ function handle(msg) {
 
     case 'notifications/initialized':
     case 'notifications/cancelled':
-      // Notifications have no id → no response.
+      // 通知消息没有 id，因此不需要响应。
       return
 
     case 'tools/list':
@@ -113,9 +117,8 @@ function handle(msg) {
       return
 
     default:
-      // SDK probes for some optional methods (logging/setLevel,
-      // resources/subscribe, …). Respond with method-not-found so the
-      // SDK falls back gracefully rather than hanging on a missing reply.
+      // SDK 会探测一些可选方法（如 logging/setLevel、resources/subscribe 等）。
+      // 这里返回 method-not-found，让 SDK 能优雅降级，而不是因为等不到响应而挂住。
       if (typeof id !== 'undefined') {
         error(id, -32601, `Method not found: ${method}`)
       }

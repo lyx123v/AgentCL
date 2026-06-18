@@ -3,45 +3,45 @@ import { describe, expect, it } from 'vitest'
 import { MCP_MAX_NAME_LEN, buildCallableName } from '../src/mcp/name-mangling.js'
 
 describe('buildCallableName', () => {
-  it('produces <server>__<tool> for clean inputs', () => {
+  it('对于干净输入会生成 <server>__<tool>', () => {
     const name = buildCallableName('filesystem', 'read_file', new Set())
     expect(name).toBe('filesystem__read_file')
   })
 
-  it('sanitises disallowed chars to underscore', () => {
+  it('会把不允许的字符清洗成下划线', () => {
     const name = buildCallableName('my-server.v2', 'foo:bar', new Set())
-    // Hyphens, dots, colons → "_"; runs collapse to a single underscore
+    // 连字符、点号、冒号都会变成 `_`，连续片段会折叠成一个下划线。
     expect(name).toBe('my_server_v2__foo_bar')
   })
 
-  it('falls back to hash when sanitisation empties a part', () => {
-    // All-CJK server name has no [A-Za-z0-9_] chars — must still produce
-    // a valid, unique identifier rather than `__tool`.
+  it('当清洗后某一段为空时会退回到哈希', () => {
+    // 纯中文服务器名不包含 [A-Za-z0-9_] 字符，
+    // 但仍必须生成合法且唯一的标识符，而不是 `__tool`。
     const name = buildCallableName('文件系统', 'read', new Set())
     expect(name).toMatch(/^[a-f0-9]{6}__read$/)
   })
 
-  it('stays under the 64-char cap with truncation hash', () => {
+  it('会通过截断哈希控制在 64 字符上限内', () => {
     const longServer = 'x'.repeat(40)
     const longTool = 'y'.repeat(40)
     const name = buildCallableName(longServer, longTool, new Set())
     expect(name.length).toBeLessThanOrEqual(MCP_MAX_NAME_LEN)
-    // Truncated form ends with `_<6-char hash>` so two long, similar
-    // names don't collapse to the same string.
+    // 截断形式会以 `_<6-char hash>` 结尾，
+    // 避免两个很长且相似的名字收敛成同一个字符串。
     expect(name).toMatch(/_[a-f0-9]{6}$/)
   })
 
-  it('disambiguates collisions across servers', () => {
+  it('会对冲突名称做消歧', () => {
     const taken = new Set<string>()
     const a = buildCallableName('serverA', 'read', taken)
     taken.add(a)
-    // Same tool name on a "different" server that sanitises to the same id
+    // “不同”服务器清洗后如果得到相同标识，也必须继续消歧。
     const b = buildCallableName('serverA', 'read', taken)
     expect(a).not.toBe(b)
-    expect(b.startsWith(a)).toBe(true) // collision suffix appended
+    expect(b.startsWith(a)).toBe(true) // 已追加冲突后缀
   })
 
-  it('always produces a unique name even on repeated collisions', () => {
+  it('即使重复发生冲突也始终能生成唯一名称', () => {
     const taken = new Set<string>()
     for (let i = 0; i < 5; i++) {
       const name = buildCallableName('s', 't', taken)

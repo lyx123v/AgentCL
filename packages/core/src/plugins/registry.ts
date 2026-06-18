@@ -1,26 +1,23 @@
-// @x-code-cli/core — Plugin registry
+// @x-code-cli/core — 插件注册表
 //
-// Built once at CLI startup by [[loader]].loadAllPlugins(), then frozen
-// for the session. The registry holds every plugin that successfully
-// loaded — enabled AND disabled — so `/plugin list` can show both, plus
-// every load error so `/plugin doctor` can surface them.
+// 它会在 CLI 启动时由 [[loader]].loadAllPlugins() 构建一次，然后在整个会话期间
+// 保持对象实例稳定。注册表会保存所有成功加载的插件，包括启用和禁用的，
+// 这样 `/plugin list` 可以同时展示两者；另外也会保留所有加载错误，
+// 供 `/plugin doctor` 输出诊断信息。
 //
-// Hot-reload model mirrors SkillRegistry: `/plugin refresh` rebuilds the
-// internal state in place (preserving the registry object identity so
-// every captured `options.pluginRegistry` reference stays valid) and the
-// CLI invalidates `systemPromptCache` afterwards — the byte-stability
-// constraint described in CLAUDE.md still applies because plugins
-// contribute skills / agents / commands into the system prompt.
+// 热重载模型与 SkillRegistry 类似：`/plugin refresh` 会原地重建内部状态，
+// 以保持 `options.pluginRegistry` 等被捕获引用继续有效；随后 CLI 还会使
+// `systemPromptCache` 失效。因为插件可能向 system prompt 注入 skills /
+// agents / commands，所以 CLAUDE.md 中关于字节稳定性的约束依然成立。
 import type { LoadedPlugin, PluginLoadError } from './types.js'
 
-/** Summary of what changed between two registry snapshots — used by
- *  `/plugin refresh` to render an "added / removed / changed" message
- *  the same way `/mcp refresh` and `/skill refresh` do. */
+/** 两次注册表快照之间的变化摘要。
+ *  `/plugin refresh` 会用它来渲染 “新增 / 移除 / 变化” 风格的提示信息。 */
 export interface PluginReloadSummary {
-  added: string[]
-  removed: string[]
-  changed: string[]
-  unchanged: string[]
+  added: string[] // 新增的插件 id 列表
+  removed: string[] // 被移除的插件 id 列表
+  changed: string[] // 内容或状态发生变化的插件 id 列表
+  unchanged: string[] // 与上一次相比无变化的插件 id 列表
 }
 
 export class PluginRegistry {
@@ -33,45 +30,43 @@ export class PluginRegistry {
     this.errors = [...errors]
   }
 
-  /** Enabled plugin by id. Disabled plugins are hidden from this lookup —
-   *  use [[getEntry]] when you need to inspect the disabled flag (e.g.
-   *  `/plugin list`). */
+  /** 按 id 获取“已启用”的插件。
+   *  禁用插件不会从这里返回；如果需要读取其禁用状态，请改用 [[getEntry]]。 */
   get(id: string): LoadedPlugin | undefined {
     const p = this.byId.get(id)
     if (!p || !p.enabled) return undefined
     return p
   }
 
-  /** Plugin by id including disabled ones. */
+  /** 按 id 获取插件，包含被禁用的插件。 */
   getEntry(id: string): LoadedPlugin | undefined {
     return this.byId.get(id)
   }
 
-  /** Enabled plugins only — what the agent loop sees. */
+  /** 返回所有已启用插件，也就是 agent loop 实际可见的插件集合。 */
   list(): LoadedPlugin[] {
     return [...this.byId.values()].filter((p) => p.enabled)
   }
 
-  /** Every loaded plugin, with the disabled ones. */
+  /** 返回所有已加载插件，包含禁用项。 */
   listAll(): LoadedPlugin[] {
     return [...this.byId.values()]
   }
 
-  /** Plugin ids only (enabled). */
+  /** 返回所有已启用插件的 id。 */
   ids(): string[] {
     return this.list().map((p) => p.id)
   }
 
-  /** Non-fatal errors collected during load. Surfaced by `/plugin doctor`. */
+  /** 返回加载过程中收集到的非致命错误，供 `/plugin doctor` 展示。 */
   loadErrors(): readonly PluginLoadError[] {
     return this.errors
   }
 
-  /** Replace the in-memory plugin list with a fresh load. Used by
-   *  `/plugin refresh` — keeps the same PluginRegistry object identity
-   *  so every cached reference stays valid. Returns a diff summary so
-   *  the caller can render an "added / removed / changed / unchanged"
-   *  message. */
+  /** 用一份新的加载结果替换内存中的插件列表。
+   *  该方法用于 `/plugin refresh`，并保持 PluginRegistry 实例本身不变，
+   *  以确保所有缓存引用继续有效。返回值是差异摘要，调用方可据此渲染
+   *  “新增 / 移除 / 变化 / 未变化” 提示。 */
   reload(plugins: LoadedPlugin[], errors: PluginLoadError[] = []): PluginReloadSummary {
     const previous = this.byId
     const next = new Map<string, LoadedPlugin>()
@@ -103,9 +98,9 @@ export class PluginRegistry {
   }
 }
 
-/** Empty registry — used when plugin loading is disabled (e.g.
- *  `--no-plugins` startup flag) or no plugins are installed. Cheaper than
- *  null-checking the registry everywhere downstream. */
+/** 返回一个空插件注册表。
+ *  用于插件加载被禁用（如 `--no-plugins`）或当前没有安装任何插件的场景，
+ *  比在下游到处写空值判断更简单。 */
 export function emptyPluginRegistry(): PluginRegistry {
   return new PluginRegistry([], [])
 }

@@ -1,6 +1,6 @@
-// @x-code-cli/core — webFetch tool (HTTP fetch + HTML→Markdown, with LRU cache + CF fallback)
+// @x-code-cli/core — webFetch 工具（HTTP 抓取 + HTML 转 Markdown，带 LRU 缓存与 Cloudflare 回退）
 import * as cheerio from 'cheerio'
-// @ts-expect-error turndown has no types
+// @ts-expect-error turndown 没有类型定义
 import TurndownService from 'turndown'
 
 import { tool } from 'ai'
@@ -13,14 +13,13 @@ import { VERSION } from '../version.js'
 import { reportProgress } from './progress.js'
 
 const FETCH_TIMEOUT_MS = 15_000
-// Markdown returned to the model. Bumped from 30 KB (which cut docs pages in half)
-// but kept well under the model's context budget: ~100 KB ≈ ~25 K tokens, roughly
-// 12% of a Sonnet 200 K window, so a single fetch can't blow context.
-// This is a per-call cap; the model can always fetch again with a narrower prompt.
+// 返回给模型的 Markdown 上限。这里从 30 KB 提高到 100 KB，避免很多文档页
+// 还没读完就被硬截断；同时它仍远低于模型的上下文预算，因此单次抓取不会把
+// 上下文直接撑爆。这个限制是单次调用级别的，模型仍可通过更窄的 prompt 再抓一次。
 const MAX_CONTENT_CHARS = 100_000
-// Raw HTML ceiling before turndown. 10 MB is comfortable for any real doc page;
-// enforced both by content-length header AND by streaming body read (see
-// readResponseBody) so chunked responses are also bounded.
+// turndown 转换前的原始 HTML 上限。10 MB 足以覆盖几乎所有真实文档页。
+// 这个限制同时通过 content-length 头和流式 body 读取（见 readResponseBody）
+// 两层执行，因此即便是 chunked 响应也不会失控。
 const MAX_HTTP_BYTES = 10 * 1024 * 1024
 const MAX_URL_LENGTH = 2000
 const CACHE_TTL_MS = 15 * 60 * 1000
@@ -28,55 +27,55 @@ const CACHE_MAX_ENTRIES = 50
 
 const BROWSER_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36'
-// Used as Cloudflare fallback: aggressive bot rules often let honest CLI UAs through
-// while blocking browser impersonators that fail TLS-fingerprint checks.
+// 作为 Cloudflare 回退 UA 使用。很多激进规则会放行“坦诚表明自己是 CLI”
+// 的请求，却拦截那些 TLS 指纹对不上、但假装浏览器的请求。
 const FALLBACK_UA = `x-code-cli/${VERSION} (+https://github.com/woai3c/x-code-cli)`
 
 const YEAR = new Date().getFullYear()
 
-// ── SSRF protection ──
-// Reject URLs targeting internal/private networks. Mirrors Claude Code's
-// validateURL: hostname must have ≥2 dot-separated segments (rejects
-// `localhost`, bare hostnames), no embedded credentials, no non-HTTP schemes,
-// and no IPs in private/link-local/loopback ranges.
+// ── SSRF 防护 ──
+// 拒绝访问内网 / 私网地址。思路与 Claude Code 的 validateURL 接近：
+// hostname 至少要有两个点分段（过滤 `localhost` 和裸主机名），不能带内嵌凭据，
+// 仅允许 HTTP/HTTPS，且 IP 不得落在私网、链路本地或回环范围内。
 
 const PRIVATE_IP_PATTERNS = [
-  /^127\./, // loopback
+  /^127\./, // 回环地址
   /^10\./, // 10.0.0.0/8
   /^172\.(1[6-9]|2\d|3[01])\./, // 172.16.0.0/12
   /^192\.168\./, // 192.168.0.0/16
-  /^169\.254\./, // link-local (AWS/GCP metadata)
+  /^169\.254\./, // 链路本地地址（常见于 AWS/GCP 元数据）
   /^0\./, // 0.0.0.0/8
-  /^::1$/, // IPv6 loopback
-  /^fd[0-9a-f]{2}:/i, // IPv6 ULA
-  /^fe80:/i, // IPv6 link-local
+  /^::1$/, // IPv6 回环地址
+  /^fd[0-9a-f]{2}:/i, // IPv6 唯一本地地址
+  /^fe80:/i, // IPv6 链路本地地址
 ]
 
+/** 判断 hostname 是否属于私有网络或本地地址。 */
 function isPrivateHost(hostname: string): boolean {
   const lower = hostname.toLowerCase()
   if (lower === 'localhost' || lower.endsWith('.local') || lower.endsWith('.internal')) return true
-  // IP-literal in URL — strip surrounding brackets for IPv6
+  // URL 里如果直接写了 IP 字面量，IPv6 会带方括号，这里先去掉再判断。
   const bare = lower.startsWith('[') ? lower.slice(1, -1) : lower
   return PRIVATE_IP_PATTERNS.some((re) => re.test(bare))
 }
 
-/** @internal Exported for testing only. */
+/** 校验抓取 URL 是否安全合法。仅为测试目的对外导出。 */
 export function validateFetchUrl(url: string): string | null {
-  if (url.length > MAX_URL_LENGTH) return `URL exceeds ${MAX_URL_LENGTH} character limit`
+  if (url.length > MAX_URL_LENGTH) return `URL 超过 ${MAX_URL_LENGTH} 个字符的长度限制`
   let parsed: URL
   try {
     parsed = new URL(url)
   } catch {
-    return 'Invalid URL'
+    return 'URL 无效'
   }
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-    return `Unsupported protocol: ${parsed.protocol} (only http/https allowed)`
+    return `不支持的协议：${parsed.protocol}（仅允许 http/https）`
   }
-  if (parsed.username || parsed.password) return 'URLs with embedded credentials are not allowed'
+  if (parsed.username || parsed.password) return '不允许使用内嵌账号密码的 URL'
   const parts = parsed.hostname.split('.')
-  if (parts.length < 2) return `Hostname "${parsed.hostname}" is not a public domain (must have at least two segments)`
+  if (parts.length < 2) return `主机名 "${parsed.hostname}" 不是公共域名（至少需要两个段）`
   if (isPrivateHost(parsed.hostname)) {
-    return `Fetching private/internal address "${parsed.hostname}" is blocked for security`
+    return `出于安全原因，禁止抓取私有/内网地址 "${parsed.hostname}"`
   }
   return null
 }
@@ -88,6 +87,7 @@ const turndown = new TurndownService({
   codeBlockStyle: 'fenced',
 }) as { turndown: (html: string) => string }
 
+/** 按指定 User-Agent 发起抓取请求。 */
 async function doFetch(url: string, userAgent: string): Promise<Response> {
   return fetch(url, {
     headers: {
@@ -100,8 +100,8 @@ async function doFetch(url: string, userAgent: string): Promise<Response> {
   })
 }
 
-/** Stream-read response body with a hard byte cap. Prevents OOM on chunked
- *  responses where content-length is absent or lying. */
+/** 以流式方式读取响应体，并施加硬字节上限。
+ *  用于防止 content-length 缺失或不可信的 chunked 响应打爆内存。 */
 async function readResponseBody(response: Response, maxBytes: number): Promise<string> {
   const reader = response.body?.getReader()
   if (!reader) return response.text()
@@ -129,59 +129,58 @@ async function readResponseBody(response: Response, maxBytes: number): Promise<s
   return new TextDecoder().decode(merged)
 }
 
+/** 按工具约定格式组织输出，并在需要时附带抽取提示。 */
 function formatOutput(url: string, markdown: string, prompt?: string): string {
   if (prompt) {
-    return `# Content from ${url}\n\n${markdown}\n\n---\nExtract instruction: ${prompt}`
+    return `# 来自 ${url} 的内容\n\n${markdown}\n\n---\n提取指令：${prompt}`
   }
   return markdown
 }
 
 export const webFetch = tool({
   description:
-    `Fetch a web page and extract its content as markdown. No API key needed. ` +
-    `When summarizing the returned content for the user, preserve key details, concrete examples, ` +
-    `section structure, and numbers — don't over-compress. ` +
-    `Results are cached for 15 minutes per URL, so repeated reads of the same page are free. ` +
-    `The current year is ${YEAR} — use it whenever the user asks for recent/latest/current information.`,
+    `抓取网页并把内容提取成 Markdown，不需要 API key。` +
+    `当你基于返回内容给用户总结时，请保留关键细节、具体示例、章节结构和数字，不要过度压缩。` +
+    `结果会按 URL 缓存 15 分钟，因此重复读取同一页面几乎没有额外成本。` +
+    `当前年份是 ${YEAR}，当用户询问最近/最新/当前信息时请主动利用这个时间背景。`,
   inputSchema: z.object({
-    url: z.string().url().describe('The URL to fetch'),
-    prompt: z.string().optional().describe('What information to extract from the page'),
+    url: z.string().url().describe('要抓取的 URL'),
+    prompt: z.string().optional().describe('希望从页面中提取什么信息'),
   }),
   execute: async ({ url, prompt }, { toolCallId }) => {
     try {
       const urlError = validateFetchUrl(url)
-      if (urlError) return `Error: ${urlError}`
+      if (urlError) return `错误：${urlError}`
 
       const cached = fetchCache.get(url)
       if (cached) {
-        reportProgress(toolCallId, 'Using cached copy')
+        reportProgress(toolCallId, '正在使用缓存副本')
         return formatOutput(url, cached, prompt)
       }
 
-      reportProgress(toolCallId, `Fetching ${url}`)
+      reportProgress(toolCallId, `正在抓取 ${url}`)
       let response = await doFetch(url, BROWSER_UA)
 
-      // Cloudflare bot-challenge fallback: on 403 + cf-mitigated header, retry with
-      // an honest CLI UA. Many CF rules whitelist identified crawlers while blocking
-      // anything that fails the browser TLS fingerprint check.
+      // Cloudflare 机器人挑战回退：如果遇到 403 且带 cf-mitigated 头，
+      // 就改用一个老实声明自己是 CLI 的 UA 重试。
       if (response.status === 403 && response.headers.get('cf-mitigated') !== null) {
         response = await doFetch(url, FALLBACK_UA)
       }
 
       if (!response.ok) {
-        return `Error: HTTP ${response.status} ${response.statusText}`
+        return `错误：HTTP ${response.status} ${response.statusText}`
       }
 
-      // Reject upfront when content-length exceeds the cap.
+      // 如果 content-length 已经明确超限，就提前拒绝。
       const contentLength = Number(response.headers.get('content-length') ?? '0')
       if (contentLength > MAX_HTTP_BYTES) {
         const mb = Math.round(contentLength / 1024 / 1024)
-        return `Error: Content too large (${mb} MB, limit ${MAX_HTTP_BYTES / 1024 / 1024} MB)`
+        return `错误：内容过大（${mb} MB，限制为 ${MAX_HTTP_BYTES / 1024 / 1024} MB）`
       }
 
       const contentType = response.headers.get('content-type') ?? ''
-      // Stream-read with hard byte cap — prevents OOM on chunked responses
-      // where content-length is absent or lies.
+      // 以硬字节上限流式读取，避免 chunked 响应在 content-length 缺失
+      // 或不可信时造成内存失控。
       const body = await readResponseBody(response, MAX_HTTP_BYTES)
 
       if (contentType.includes('application/json')) {
@@ -196,17 +195,17 @@ export const webFetch = tool({
       const mainContent = $('main, article, .content, .post, #content').first()
       const html = mainContent.length ? mainContent.html() : $('body').html()
 
-      if (!html) return 'Error: Could not extract content from page.'
+      if (!html) return '错误：无法从页面中提取内容。'
 
       let markdown: string = turndown.turndown(html)
       if (markdown.length > MAX_CONTENT_CHARS) {
-        markdown = markdown.slice(0, MAX_CONTENT_CHARS) + '\n\n... [content truncated]'
+        markdown = markdown.slice(0, MAX_CONTENT_CHARS) + '\n\n... [内容已截断]'
       }
 
       fetchCache.set(url, markdown)
       return formatOutput(url, markdown, prompt)
     } catch (err) {
-      return formatToolError('fetching URL', err)
+      return formatToolError('抓取 URL', err)
     }
   },
 })

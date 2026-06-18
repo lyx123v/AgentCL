@@ -1,5 +1,4 @@
-// Detect API keys from env (and optionally .env), map to a flat list of model
-// ids the user can pick to drive the e2e suite.
+// 从环境变量（以及可选的 .env）中识别 API Key，并映射成可供 e2e 套件使用的模型列表。
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -9,8 +8,8 @@ const REPO_ROOT = path.resolve(__dirname, '..', '..', '..', '..', '..')
 
 export const DEFAULT_MODEL = 'deepseek:deepseek-v4-flash'
 
-/** Provider env-var → list of model ids that can be selected when that key is set.
- *  Keep aligned with `packages/core/src/types/index.ts::PROVIDER_DETECTION_ORDER`. */
+/** 提供商环境变量 -> 当该 Key 存在时可选择的模型 ID 列表。
+ *  需要与 `packages/core/src/types/index.ts::PROVIDER_DETECTION_ORDER` 保持一致。 */
 const PROVIDER_MODELS: Record<string, string[]> = {
   DEEPSEEK_API_KEY: ['deepseek:deepseek-v4-flash', 'deepseek:deepseek-v4-pro'],
   ANTHROPIC_API_KEY: [
@@ -41,8 +40,8 @@ const PROVIDER_MODELS: Record<string, string[]> = {
   MOONSHOT_API_KEY: ['moonshotai:kimi-k2.6', 'moonshotai:kimi-k2.5'],
 }
 
-/** Short aliases — accepted on CLI `--model` flag. Aligns with product's
- *  `MODEL_ALIASES` table; keep them in sync. */
+/** 简短别名，可直接用于 CLI 的 `--model` 参数。
+ *  需与产品中的 `MODEL_ALIASES` 表保持同步。 */
 export const ALIASES: Record<string, string> = {
   fable: 'anthropic:claude-fable-5',
   sonnet: 'anthropic:claude-sonnet-4-6',
@@ -58,12 +57,13 @@ export const ALIASES: Record<string, string> = {
   kimi: 'moonshotai:kimi-k2.6',
 }
 
+// 将用户输入的模型别名解析为完整模型 ID。
 export function resolveModelArg(input: string): string {
   return ALIASES[input] ?? input
 }
 
-/** Best-effort .env loader. Does NOT overwrite values already in process.env.
- *  Returns the merged env after loading. */
+/** 尽力加载 .env，但不会覆盖 process.env 中已经存在的值。
+ *  返回加载后的合并环境变量结果。 */
 export async function loadDotenv(): Promise<Record<string, string>> {
   const envPath = path.join(REPO_ROOT, '.env')
   let parsed: Record<string, string> = {}
@@ -76,20 +76,20 @@ export async function loadDotenv(): Promise<Record<string, string>> {
       if (eq < 0) continue
       const key = line.slice(0, eq).trim()
       let value = line.slice(eq + 1).trim()
-      // Strip optional surrounding quotes.
+      // 去掉可选的包裹引号。
       if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
         value = value.slice(1, -1)
       }
       parsed[key] = value
     }
   } catch {
-    // No .env — that's fine.
+    // 没有 .env 也没关系。
   }
-  // Don't overwrite already-set process.env keys.
+  // 不覆盖 process.env 中已经显式设置的值。
   for (const [k, v] of Object.entries(parsed)) {
     if (process.env[k] == null) process.env[k] = v
   }
-  // Build a return env that has only string values.
+  // 构造只包含字符串值的返回对象。
   const env: Record<string, string> = {}
   for (const [k, v] of Object.entries(process.env)) {
     if (typeof v === 'string') env[k] = v
@@ -102,8 +102,7 @@ export interface ModelOption {
   providerEnvKey: string
 }
 
-/** Given the current env, return the flat list of (modelId, sourceEnvKey)
- *  pairs the user can pick. */
+/** 根据当前环境变量，返回用户可选的 `(modelId, sourceEnvKey)` 扁平列表。 */
 export function availableModels(env: Record<string, string>): ModelOption[] {
   const out: ModelOption[] = []
   for (const [envKey, models] of Object.entries(PROVIDER_MODELS)) {
@@ -111,24 +110,24 @@ export function availableModels(env: Record<string, string>): ModelOption[] {
       for (const modelId of models) out.push({ modelId, providerEnvKey: envKey })
     }
   }
-  // OpenAI-compatible custom endpoint
+  // OpenAI 兼容协议的自定义端点。
   if (env.OPENAI_COMPATIBLE_API_KEY && env.OPENAI_COMPATIBLE_BASE_URL) {
     out.push({ modelId: 'custom:default', providerEnvKey: 'OPENAI_COMPATIBLE_API_KEY' })
   }
   return out
 }
 
-/** Pretty-printable summary of detected keys. Returns lines for direct printing. */
+/** 生成人类可读的已检测 Key 摘要，返回可直接打印的文本行。 */
 export function describeDetectedKeys(env: Record<string, string>): string[] {
   const lines: string[] = []
   for (const [envKey, models] of Object.entries(PROVIDER_MODELS)) {
     if (env[envKey]) {
       const family = envKey.replace(/_API_KEY|_GENERATIVE_AI_API_KEY/, '').toLowerCase()
-      lines.push(`  ${envKey}  →  ${family}: ${models.map((m) => m.split(':')[1]).join(' / ')}`)
+      lines.push(`  ${envKey}  ->  ${family}：${models.map((m) => m.split(':')[1]).join(' / ')}`)
     }
   }
   if (env.OPENAI_COMPATIBLE_API_KEY && env.OPENAI_COMPATIBLE_BASE_URL) {
-    lines.push(`  OPENAI_COMPATIBLE_API_KEY  →  custom endpoint @ ${env.OPENAI_COMPATIBLE_BASE_URL}`)
+    lines.push(`  OPENAI_COMPATIBLE_API_KEY  ->  自定义端点 @ ${env.OPENAI_COMPATIBLE_BASE_URL}`)
   }
   return lines
 }

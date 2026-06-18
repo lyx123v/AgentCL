@@ -1,4 +1,4 @@
-// @x-code-cli/core — Public type definitions
+// @x-code-cli/core — 对外公开的类型定义
 import type { LanguageModel, ModelMessage } from 'ai'
 
 import type { EditDiffPayload } from '../agent/diff.js'
@@ -11,312 +11,276 @@ import type { McpRegistry } from '../mcp/registry.js'
 import type { PluginRegistry } from '../plugins/registry.js'
 import type { SkillRegistry } from '../skills/registry.js'
 
-// ─── Permission ───
+// ─── 权限 ───
 
 export type PermissionLevel = 'always-allow' | 'ask' | 'deny'
 
-/** Approval mode for the current session.
+/** 当前会话的审批模式。
  *
- *    'default'      — normal flow: write tools ask, model can call anything.
- *    'plan'         — read-only mode: the model is told (via system-prompt
- *                     overlay) to explore + write a plan to a session-local
- *                     plan file but make no other edits. Enforcement is
- *                     prompt-based — matching Claude Code, no hard
- *                     permission-layer block — so a non-compliant model
- *                     would still hit the regular `ask` prompt for
- *                     write/edit/shell.
- *    'acceptEdits'  — write tools (writeFile / edit) auto-approve without
- *                     asking; shell still goes through normal classification
- *                     (always-allow / ask / deny) so destructive commands
- *                     stay gated. Useful right after a plan is approved —
- *                     the user already vetted the plan, having to click
- *                     "Yes" on every writeFile during implementation is
- *                     pure friction. exitPlanMode auto-switches into this
- *                     mode on approval. */
+ *    'default'      — 正常模式：写入类工具需要询问，模型可照常调用其他工具。
+ *    'plan'         — 只读规划模式：模型会被提示先探索并把计划写到会话本地的
+ *                     plan 文件里，但不做其他编辑。这里的约束主要依赖 prompt，
+ *                     与 Claude Code 一致，没有额外的硬权限拦截；因此如果模型
+ *                     不守规矩，写入/edit/shell 仍会落到常规 `ask` 流程。
+ *    'acceptEdits'  — 写入类工具（writeFile / edit）自动批准，无需再次询问；
+ *                     shell 仍按正常的 always-allow / ask / deny 分类执行，
+ *                     所以破坏性命令依旧会被拦住。适合计划刚获批后的实现阶段，
+ *                     因为用户既然已经审过计划，再对每次 writeFile 都点一次
+ *                     “Yes” 就只剩纯摩擦了。exitPlanMode 获批后会自动切到此模式。 */
 export type PermissionMode = 'default' | 'acceptEdits' | 'plan'
 
-// ─── Todo list (TodoWrite tool) ───
+// ─── Todo 清单（TodoWrite 工具） ───
 
-/** A single entry on the model's working checklist.
+/** 模型工作清单中的单个条目。
  *
- *    content    — imperative phrasing of the task ("Update auth handler")
- *    activeForm — present-continuous phrasing for the live indicator
- *                 ("Updating auth handler"); shown in UI while status is
- *                 'in_progress' so the user sees what the agent is doing
- *                 right now.
- *    status     — 'pending' | 'in_progress' | 'completed'.
+ *    content    — 任务的祈使句表达（例如“更新认证处理器”）
+ *    activeForm — 实时状态里展示的进行式表达（例如“正在更新认证处理器”）；
+ *                 当 status 为 'in_progress' 时会显示在 UI 中，让用户知道
+ *                 代理此刻正在做什么。
+ *    status     — 'pending' | 'in_progress' | 'completed'
  *
- *  Mirrors Claude Code's TodoWrite payload shape verbatim. Persisted
- *  in-memory only (LoopState.todos), per-session, no disk. */
+ *  这里的结构与 Claude Code 的 TodoWrite payload 保持一致。
+ *  仅保存在内存中（LoopState.todos），按会话隔离，不落盘。 */
 export type TodoStatus = 'pending' | 'in_progress' | 'completed'
 
 export interface TodoItem {
-  content: string
-  activeForm: string
-  status: TodoStatus
+  content: string // 任务的祈使句描述，供列表静态展示
+  activeForm: string // 任务的进行式描述，在运行中状态里展示
+  status: TodoStatus // 当前任务状态：待办、进行中或已完成
 }
 
-// ─── Token usage ───
+// ─── Token 使用统计 ───
 
 export interface TokenUsage {
-  inputTokens: number
-  outputTokens: number
-  totalTokens: number
-  /** Cached prompt tokens read (Anthropic cache_read, OpenAI cached_tokens, etc.).
-   *  Billed at a fraction of normal input rate — ratio depends on the provider.
-   *  Already counted in `inputTokens`; this field is purely informational. */
-  cacheReadTokens: number
-  /** Tokens written to provider-side cache (Anthropic cache_creation_input_tokens).
-   *  Billed at a premium over normal input rate but unlocks cheap reads on
-   *  subsequent turns. Zero on providers that don't separate creation from read. */
-  cacheCreationTokens: number
-  /** Current context-window occupancy — `input_tokens + output_tokens` of
-   *  the MOST RECENT API response (`inputTokens` already includes cache_read
-   *  + cache_write since AI SDK v6 normalises them into one field). Unlike
-   *  the cumulative fields above, this is a SNAPSHOT — overwritten each
-   *  turn, not accumulated. Drives the footer "N / M · X%" indicator.
+  inputTokens: number // 累计输入 token 数
+  outputTokens: number // 累计输出 token 数
+  totalTokens: number // 累计总 token 数
+  /** 从缓存 prompt 中读取的 token 数（如 Anthropic 的 cache_read、OpenAI 的 cached_tokens）。
+   *  这些 token 通常按低于普通输入的费率计费，具体比例取决于 provider。
+   *  它们已计入 `inputTokens`，此字段仅用于展示说明。 */
+  cacheReadTokens: number // 累计命中 provider 侧缓存读取的 token 数
+  /** 写入 provider 侧缓存的 token 数（如 Anthropic 的 cache_creation_input_tokens）。
+   *  这部分通常比普通输入更贵，但能换来后续回合的廉价缓存读取。
+   *  对不区分创建与读取的 provider 来说，这里通常为 0。 */
+  cacheCreationTokens: number // 累计写入 provider 缓存的 token 数
+  /** 当前上下文窗口占用量，对应“最近一次 API 响应”的 `input_tokens + output_tokens`
+   *  （从 AI SDK v6 起，`inputTokens` 已经吸收了 cache_read + cache_write）。
+   *  与上面的累计字段不同，这里是一个快照值：每轮覆盖，不累计。UI 底部
+   *  的 “N / M · X%” 指示器就是依赖它。
    *
-   *  Why input + output (matching every provider's definition):
-   *  every major LLM API — Anthropic, OpenAI, Google Gemini, DeepSeek,
-   *  Moonshot, Alibaba, xAI — defines "context window" as the shared
-   *  budget pool of input + output, with `input + output ≤ context_window`
-   *  as the architectural constraint (single KV-cache cap). Showing input
-   *  alone in the footer would be a different number than what users see
-   *  when reading provider docs about model context windows. The cumulative
-   *  fields above remain for `/usage` billing summaries. */
-  currentContextTokens: number
+   *  为什么要用 input + output：因为主流 LLM API 都把上下文窗口定义成输入和
+   *  输出共享的预算池，即 `input + output ≤ context_window`。如果底部只显示输入，
+   *  那会和用户在 provider 文档里看到的上下文窗口定义不一致。 */
+  currentContextTokens: number // 最近一次响应实际占用的上下文 token 快照
 }
 
-// ─── Display messages ───
+// ─── 展示消息 ───
 
 export interface DisplayMessage {
-  id: string
-  role: 'user' | 'assistant' | 'tool'
-  content: string
-  toolCalls?: DisplayToolCall[]
-  timestamp: number
-  /** True for assistant text chunks emitted mid-stream (one per newline).
-   *  Rendered WITHOUT the trailing blank line that regular messages append,
-   *  so consecutive chunks join into a single paragraph visually. Keeps
-   *  streaming text out of the bottom cell buffer (avoids row-shift jitter)
-   *  by sending each complete line directly to scrollback. */
-  streamingChunk?: boolean
-  /** Compact slash-command rendering, matching Claude Code's 2-line block:
+  id: string // 消息唯一标识
+  role: 'user' | 'assistant' | 'tool' // 消息来源角色
+  content: string // 要展示的文本内容
+  toolCalls?: DisplayToolCall[] // 若该消息关联工具调用，则附带工具调用列表
+  timestamp: number // 消息时间戳
+  /** 为 true 时，表示这是 assistant 在流式输出过程中吐出的中间文本块（通常每个换行一块）。
+   *  这类消息渲染时不会追加普通消息末尾的空行，因此连续块在视觉上会拼成同一段，
+   *  也能避免把流式输出塞进底部 cell buffer 后造成行抖动。 */
+  streamingChunk?: boolean // 是否为流式输出中的中间消息块
+  /** 紧凑 slash 命令渲染模式，对齐 Claude Code 的两行展示风格：
    *    > /model
-   *      ⎿  Set model to Sonnet 4.6
-   *  'command-echo' (user role) drops the trailing blank that regular user
-   *  messages append; 'command-result' (assistant role) renders with the
-   *  ⎿ prefix and a single trailing newline instead of markdown + \n\n.
-   *  Used only for short, single-line command responses. Long multi-line
-   *  output (/help, /usage) keeps the regular assistant-message path. */
-  kind?: 'command-echo' | 'command-result'
+   *      ⎿  已切换到 Sonnet 4.6
+   *  `command-echo`（user role）不会带常规用户消息的尾部空行；
+   *  `command-result`（assistant role）则使用 ⎿ 前缀，并只保留一个结尾换行。 */
+  kind?: 'command-echo' | 'command-result' // 消息展示样式类别
 }
 
 export interface DisplayToolCall {
-  id: string
-  toolName: string
-  input: Record<string, unknown>
-  output?: string
-  /** `error` marks a tool that finished but with a non-zero exit / thrown
-   *  exception — the stdout-writer renders its result body in red so
-   *  failures stand out in scrollback. `denied` is reserved for the
-   *  permission-denial path. */
-  status: 'pending' | 'running' | 'completed' | 'denied' | 'error'
-  /** How long the tool call took to execute (milliseconds) */
-  durationMs?: number
-  /** Structured patch produced by writeFile / edit — drives the colored
-   *  diff block under the tool bullet in scrollback. Absent for non-edit
-   *  tools, hydrated history (we don't recompute on session resume), and
-   *  edits that actually had no effect (oldContent === newContent). */
-  editPayload?: EditDiffPayload
+  id: string // 工具调用唯一标识
+  toolName: string // 工具名称
+  input: Record<string, unknown> // 工具调用入参
+  output?: string // 工具调用输出文本
+  /** `error` 表示工具虽已结束，但以非零退出码或异常结束，stdout writer 会把这类
+   *  结果渲染成红色，方便用户快速看到失败。`denied` 专门留给权限拒绝场景。 */
+  status: 'pending' | 'running' | 'completed' | 'denied' | 'error' // 当前工具调用状态
+  /** 工具调用实际执行耗时，单位毫秒。 */
+  durationMs?: number // 工具调用耗时
+  /** 由 writeFile / edit 产生的结构化补丁数据，用于在滚动区工具条目下渲染彩色 diff。
+   *  非编辑类工具、会话恢复后的历史消息，以及实际没有产生内容变化的编辑，都不会带这个字段。 */
+  editPayload?: EditDiffPayload // 与本次编辑相关的结构化 diff 数据
 }
 
-// ─── Agent callbacks (core → UI bridge) ───
+// ─── Agent 回调（core → UI 桥接层） ───
 
 export interface AgentCallbacks {
-  onTextDelta: (text: string) => void
-  onToolCall: (toolCallId: string, toolName: string, input: Record<string, unknown>) => void
-  /** Streamed progress messages emitted by a tool while it runs (e.g.
-   *  "Searching: query" → "Found 5 results"). Only the LATEST message is
-   *  shown in the live UI; the final summary comes through onToolResult. */
-  onToolProgress: (toolCallId: string, message: string) => void
-  onToolResult: (toolCallId: string, result: string, isError?: boolean) => void
-  /** Optional. Fired right BEFORE `onToolResult` for a successful
-   *  writeFile / edit, carrying the structured patch + line counts so the
-   *  UI can render a diff block under the tool bullet. Skipped for
-   *  permission-denied / errored writes (the file wasn't actually changed)
-   *  and for no-op edits that produced an identical file. */
-  onFileEdit?: (toolCallId: string, payload: EditDiffPayload) => void
+  onTextDelta: (text: string) => void // 流式文本增量回调，用于实时渲染 assistant 输出
+  onToolCall: (toolCallId: string, toolName: string, input: Record<string, unknown>) => void // 工具开始调用时触发
+  /** 工具运行中发出的进度消息（例如“正在搜索”→“找到 5 条结果”）。
+   *  实时 UI 只展示最新一条，最终摘要仍通过 onToolResult 进入消息流。 */
+  onToolProgress: (toolCallId: string, message: string) => void // 工具进度更新回调
+  onToolResult: (toolCallId: string, result: string, isError?: boolean) => void // 工具结束时返回结果或错误
+  /** 可选。成功执行 writeFile / edit 时，会在 `onToolResult` 之前触发，
+   *  并附带结构化补丁与行数信息，供 UI 在工具条目下方渲染 diff 块。
+   *  若写入被拒绝、执行报错，或编辑其实没有产生变化，则不会触发。 */
+  onFileEdit?: (toolCallId: string, payload: EditDiffPayload) => void // 成功文件编辑后的 diff 回调
   onAskPermission: (toolCall: {
-    toolCallId: string
-    toolName: string
-    input: Record<string, unknown>
-  }) => Promise<'yes' | 'always' | 'no'>
-  onAskUser: (question: string, options: { label: string; description: string }[]) => Promise<string>
-  /** Triggered by `exitPlanMode`. Resolve `true` to leave plan mode and
-   *  let the model start implementing; resolve `false` to reject the plan
-   *  and keep the model in plan mode for further iteration. */
-  onPlanApprovalRequest: (planText: string) => Promise<boolean>
-  /** Fired whenever permissionMode flips so the UI can resync the bottom
-   *  indicator and (when persisting) write the new value to user config. */
-  onPlanModeChange: (mode: PermissionMode) => void
-  /** Fired after the model calls `todoWrite` so the UI can show the
-   *  current checklist. The full list is passed every call (todoWrite
-   *  is a full-replacement tool, not a delta) — UI just stores it. */
-  onTodosUpdate: (todos: TodoItem[]) => void
-  onShellOutput: (chunk: string) => void
-  onUsageUpdate: (usage: TokenUsage) => void
-  onContextCompressed: (summary: string) => void
-  /** Fired at each phase boundary during context compression so the UI
-   *  can show a spinner label that tracks progress. */
-  onCompressionProgress?: (description: string) => void
-  onError: (error: Error) => void
-  /** Fired by the sub-agent runner to stream progress from child agent loops.
-   *  The CLI UI uses these events to build the collapsed/expanded task block. */
-  onSubAgentEvent?: (event: SubAgentEvent) => void
-  /** Optional. Fired by the post-turn memory extractor for each fact it
-   *  commits to AutoMemory. Surfaces "Remembered: …" in scrollback so the
-   *  user can see what the silent extractor saved. The extractor is
-   *  fire-and-forget (runs after agentLoop returns), so this callback may
-   *  fire AFTER `submit()` resolved and even into the next turn — keep
-   *  the closure free of per-turn state. */
-  onMemoryWrite?: (notice: MemoryWriteNotice) => void
+    toolCallId: string // 待审批工具调用的唯一标识
+    toolName: string // 待审批工具名称
+    input: Record<string, unknown> // 待审批工具输入参数
+  }) => Promise<'yes' | 'always' | 'no'> // 向用户请求权限审批的回调
+  onAskUser: (
+    question: string,
+    options: { label: string // 选项标题
+      description: string // 选项说明
+    }[],
+  ) => Promise<string> // 向用户发问并等待选择结果
+  /** 由 `exitPlanMode` 触发。返回 `true` 表示批准计划并退出 plan 模式，
+   *  允许模型进入实现阶段；返回 `false` 表示拒绝计划并继续留在 plan 模式迭代。 */
+  onPlanApprovalRequest: (planText: string) => Promise<boolean> // 计划审批请求回调
+  /** 每次 permissionMode 变化时触发，让 UI 同步底部状态，也可顺带把新值持久化到用户配置。 */
+  onPlanModeChange: (mode: PermissionMode) => void // 规划模式切换回调
+  /** 模型调用 `todoWrite` 后触发，用来更新 UI 中的实时清单。
+   *  todoWrite 每次传的是完整列表，不是 delta，因此 UI 直接整表替换即可。 */
+  onTodosUpdate: (todos: TodoItem[]) => void // Todo 清单更新回调
+  onShellOutput: (chunk: string) => void // shell 流式输出片段回调
+  onUsageUpdate: (usage: TokenUsage) => void // token 使用统计更新回调
+  onContextCompressed: (summary: string) => void // 上下文压缩完成后的摘要回调
+  /** 在上下文压缩的各阶段边界触发，让 UI 可以显示跟随进度变化的 spinner 文案。 */
+  onCompressionProgress?: (description: string) => void // 上下文压缩阶段进度回调
+  onError: (error: Error) => void // 统一错误回调
+  /** 由子代理执行器触发，用来流式转发子代理 loop 的进度事件。
+   *  CLI UI 会用这些事件构造可折叠/展开的 task 展示块。 */
+  onSubAgentEvent?: (event: SubAgentEvent) => void // 子代理事件回调
+  /** 可选。后处理记忆提取器每成功写入一条 AutoMemory 时触发，
+   *  用于在滚动区展示 “Remembered: …” 之类的提示，让用户知道静默提取器记住了什么。
+   *  该提取器是 fire-and-forget 的，因此这个回调可能在 `submit()` 返回之后，
+   *  甚至下一轮开始后才被触发，所以闭包里不要依赖“仅本轮有效”的状态。 */
+  onMemoryWrite?: (notice: MemoryWriteNotice) => void // 自动记忆写入提示回调
 }
 
-// ─── Agent options ───
+// ─── Agent 选项 ───
 
 export interface AgentOptions {
-  modelId: string
-  trustMode: boolean
-  /** Hard cap on iterations within a single `agentLoop` invocation. When
-   *  omitted, the loop runs without a turn cap — the user's Esc / Ctrl+C
-   *  is the only stop. Sub-agents and `--print` mode are the two real
-   *  callers that pass a value; interactive sessions leave it unset. */
-  maxTurns?: number
-  printMode: boolean
-  /** When true, the agent loop opts into the maximum reasoning each
-   *  provider supports (see providers/thinking.ts for the mapping).
-   *  Persisted in `~/.x-code/config.json` as `thinking: boolean`,
-   *  toggled at runtime via `/thinking on|off`. Defaults to false. */
-  thinking?: boolean
-  /** Initial permission mode for the session. Defaults to 'default'.
-   *  Set from `--plan` CLI flag or `loadUserConfig().permissionMode`. */
-  permissionMode?: PermissionMode
-  systemPromptExtra?: string
-  abortSignal?: AbortSignal
+  modelId: string // 当前会话使用的模型 ID
+  trustMode: boolean // 是否启用更信任模型的运行模式
+  /** 单次 `agentLoop` 调用允许的最大迭代轮数。
+   *  如果省略，则不会设置轮数上限，用户按 Esc / Ctrl+C 才是唯一停止方式。
+   *  实际上传值的主要是子代理与 `--print` 模式；交互式会话通常不设。 */
+  maxTurns?: number // 本次 agent loop 的最大轮次限制
+  printMode: boolean // 是否处于非交互式 print 模式
+  /** 为 true 时，agent loop 会请求各 provider 支持的最高 reasoning 强度
+   *  （映射关系见 providers/thinking.ts）。该值会持久化到
+   *  `~/.x-code/config.json` 的 `thinking` 字段，也可通过 `/thinking on|off`
+   *  在运行时切换，默认 false。 */
+  thinking?: boolean // 是否启用深度思考模式
+  /** 本次会话的初始权限模式，默认是 'default'。
+   *  通常来自 CLI 的 `--plan` 标志，或 `loadUserConfig().permissionMode`。 */
+  permissionMode?: PermissionMode // 会话初始权限模式
+  systemPromptExtra?: string // 额外拼接到 system prompt 的文本
+  abortSignal?: AbortSignal // 用于中断当前会话或当前轮执行的 AbortSignal
 
-  // ── Sub-agent support ──
+  // ── 子代理支持 ──
 
-  /** Provider registry for resolving sub-agent model overrides.
-   *  Injected by the CLI at startup. Absent = sub-agents inherit the
-   *  parent model (no independent model selection). */
+  /** provider 注册表，用于解析子代理的模型覆盖配置。
+   *  在 CLI 启动时注入。若缺失，则子代理继承父级模型，不能独立选型。 */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  modelRegistry?: { languageModel: (...args: any[]) => LanguageModel }
-  /** Sub-agent registry. Injected by the CLI at startup after scanning
-   *  built-in + custom agent definitions. Absent = task tool is not
-   *  registered (no sub-agent support). */
-  subAgentRegistry?: SubAgentRegistry
-  /** Tool allow/deny filter. Used by sub-agent loops to restrict
-   *  which tools the child can call. `task` is always in `deny`. */
-  toolFilter?: { allow?: string[]; deny?: string[] }
+  modelRegistry?: { languageModel: (...args: any[]) => LanguageModel } // 子代理可用的模型注册表
+  /** 子代理注册表。CLI 启动扫描完内置与自定义 agent 定义后注入。
+   *  若缺失，则不会注册 task 工具，也就没有子代理能力。 */
+  subAgentRegistry?: SubAgentRegistry // 可用子代理定义注册表
+  /** 工具允许/拒绝过滤器。主要供子代理 loop 使用，用来限制子代理能调用哪些工具。
+   *  其中 `task` 永远会被放进 `deny`，避免递归派生子代理。 */
+  toolFilter?: { allow?: string[]; deny?: string[] } // 工具调用白名单/黑名单过滤器
 
-  // ── Skill support ──
+  // ── Skill 支持 ──
 
-  /** Skill registry, populated at CLI startup by createSkillRegistry.
-   *  Absent means no skills are configured — activateSkill tool is not
-   *  registered and the `## Available Skills` section is omitted from
-   *  the system prompt. */
-  skillRegistry?: SkillRegistry
+  /** Skill 注册表，由 CLI 启动时的 createSkillRegistry 填充。
+   *  若缺失，表示未配置任何 skill，此时 activateSkill 工具不会注册，
+   *  system prompt 里也不会出现 `## Available Skills` 区块。 */
+  skillRegistry?: SkillRegistry // 当前会话可用的 Skill 注册表
 
-  // ── MCP support ──
+  // ── MCP 支持 ──
 
-  /** MCP registry, populated at CLI startup by loadMcpServers. Absent
-   *  means MCP is disabled entirely (no servers configured) — agent
-   *  loop short-circuits all MCP machinery. The registry itself is
-   *  immutable for the session lifetime; `/mcp refresh` replaces the
-   *  whole object on the next agentLoop entry. */
-  mcpRegistry?: McpRegistry
-  /** Permission store for MCP tool calls. Created once per CLI process,
-   *  caches the persisted always-allow list + session-scoped allows.
-   *  Absent ⇒ tool-execution falls back to ask-every-time semantics. */
-  mcpPermissionStore?: McpPermissionStore
+  /** MCP 注册表，由 CLI 启动时的 loadMcpServers 填充。
+   *  若缺失，表示 MCP 整体禁用（没有配置 server），agent loop 会直接短路
+   *  所有 MCP 相关逻辑。这个注册表在单个会话生命周期内视为不可变；
+   *  `/mcp refresh` 会在下一次进入 agentLoop 时替换整份对象。 */
+  mcpRegistry?: McpRegistry // 当前会话可用的 MCP 注册表
+  /** MCP 工具调用的权限存储。每个 CLI 进程只创建一次，用来缓存持久化的
+   *  always-allow 列表以及当前会话级别的放行结果。
+   *  若缺失，tool-execution 会退回“每次都询问”的权限语义。 */
+  mcpPermissionStore?: McpPermissionStore // MCP 权限缓存与持久化存储
 
-  // ── Plugin support ──
+  // ── 插件支持 ──
 
-  /** Plugin registry, populated at CLI startup by loadAllPlugins. Holds
-   *  every successfully-loaded plugin (enabled + disabled), exposed so
-   *  the `/plugin ...` slash command family can list / inspect / toggle
-   *  without re-scanning the cache. Plugin contributions (skills /
-   *  agents / mcp) are already merged into their respective registries
-   *  by the CLI startup wiring — this field is only the metadata
-   *  surface for the slash command UI. Absent ⇒ plugins disabled
-   *  (`--no-plugins`) or no plugins installed. */
-  pluginRegistry?: PluginRegistry
+  /** 插件注册表，由 CLI 启动时的 loadAllPlugins 填充。
+   *  它持有所有成功加载的插件（无论启用还是禁用），这样 `/plugin ...`
+   *  这组 slash 命令就能在不重新扫描缓存的前提下做列表、详情与开关操作。
+   *  插件带来的 skills / agents / mcp 等贡献已在 CLI 启动阶段并入各自注册表；
+   *  这个字段主要是给 slash 命令 UI 暴露插件元数据。
+   *  若缺失，表示插件被禁用（如 `--no-plugins`）或本机没有安装插件。 */
+  pluginRegistry?: PluginRegistry // 插件元数据注册表
 
-  /** Hook bus built from enabled plugins' `hooks` contributions. The
-   *  agent loop emits SessionStart / UserPromptSubmit / TurnComplete /
-   *  SessionEnd events through it; tool-execution adds PreToolUse /
-   *  PostToolUse. Absent ⇒ no hook emission (the agent loop skips
-   *  emit-sites entirely). Use `emptyHookBus()` for tests / sub-agents
-   *  that should be allowed to call into the emit-sites but have no
-   *  listeners. */
-  hookBus?: HookBus
+  /** Hook bus，由所有启用插件的 `hooks` 贡献构建而成。
+   *  agent loop 会通过它发出 SessionStart / UserPromptSubmit / TurnComplete /
+   *  SessionEnd 等事件，tool-execution 还会补充 PreToolUse / PostToolUse。
+   *  若缺失，则完全不发 hook（agent loop 会跳过所有 emit 点）。
+   *  对于测试或子代理这类“允许调用 emit，但实际没有监听器”的场景，可用
+   *  `emptyHookBus()` 占位。 */
+  hookBus?: HookBus // 插件 hook 事件总线
 
-  /** File-based slash command registry built from plugin-contributed
-   *  `commands/` directories. The App.tsx default slash dispatcher
-   *  checks this after the built-in command list and skill registry;
-   *  matching a name here expands the command body (with $ARGUMENTS
-   *  / ${CLAUDE_PLUGIN_ROOT} substitution) and submits as a model
-   *  prompt. Absent ⇒ no plugin commands available. */
-  commandRegistry?: CommandRegistry
+  /** 基于文件的 slash 命令注册表，由插件贡献的 `commands/` 目录构建。
+   *  App.tsx 默认的 slash 分发器会在检查完内置命令和 skill 注册表后再查这里；
+   *  一旦命中，就会展开命令体（包括 $ARGUMENTS / ${CLAUDE_PLUGIN_ROOT}
+   *  替换）并作为模型 prompt 提交。
+   *  若缺失，则表示没有可用的插件命令。 */
+  commandRegistry?: CommandRegistry // 插件扩展的 slash 命令注册表
 }
 
-// ─── Knowledge ───
+// ─── 知识 / 记忆 ───
 
 /**
- * Category taxonomy for auto memory entries. Categories describe the TYPE of
- * knowledge (who it's about, how it was learned) rather than the topic —
- * this mirrors the taxonomy Claude Code uses and produces sharper memories
- * because each category has distinct trigger conditions for the agent.
+ * 自动记忆条目的分类体系。这里描述的是“知识的类型”
+ * （它关于谁、是如何得来的），而不是具体主题本身。
+ * 这种分类方式和 Claude Code 类似，能让记忆提取更精准，因为每一类对代理
+ * 都有不同的触发条件。
  *
- * - user:      Facts about the human user — role, expertise, goals, constraints
- * - feedback:  Corrections or validated approaches ("don't mock the db", "yes, that was right")
- * - project:   Ongoing work, initiatives, decisions, non-obvious project state
- * - reference: Pointers to external systems (Linear project, Grafana dashboard, etc.)
+ * - user:      关于用户本人的事实，例如角色、专长、目标、约束
+ * - feedback:  用户给出的纠正或认可的方法，例如“别 mock 数据库”“对，就是这个”
+ * - project:   项目中的持续性工作、决策、非显而易见的状态
+ * - reference: 指向外部系统的引用，例如 Linear 项目、Grafana 面板等
  */
 export type KnowledgeCategory = 'user' | 'feedback' | 'project' | 'reference'
 
 export interface KnowledgeFact {
-  key: string
-  fact: string
-  category: KnowledgeCategory
-  date: string
+  key: string // 记忆条目的稳定键，用于去重和更新
+  fact: string // 具体记忆内容
+  category: KnowledgeCategory // 记忆所属分类
+  date: string // 记忆记录日期
 }
 
-/** Surface event emitted by the post-turn memory extractor when it commits
- *  a fact to AutoMemory. Lets the UI render a "Remembered: …" line in
- *  scrollback so the user has visibility into otherwise-silent writes. */
+/** 回合结束后的记忆提取器在把某条事实写入 AutoMemory 时抛出的展示事件。
+ *  UI 可以据此在滚动区渲染一条“已记住：...”之类提示，避免静默写入完全不可见。 */
 export interface MemoryWriteNotice {
-  scope: 'project' | 'user'
-  category: KnowledgeCategory
-  key: string
-  fact: string
+  scope: 'project' | 'user' // 写入的是项目级记忆还是用户级记忆
+  category: KnowledgeCategory // 写入记忆的分类
+  key: string // 记忆键
+  fact: string // 记忆内容
 }
 
 export interface SessionSummary {
-  id: string
-  title: string
-  startedAt: string
-  endedAt: string
-  status: 'completed' | 'in_progress' | 'abandoned'
-  summary: string
-  keyResults: string[]
-  pendingWork: string[]
-  filesModified: string[]
-  decisions: string[]
+  id: string // 会话摘要唯一标识
+  title: string // 会话标题
+  startedAt: string // 会话开始时间
+  endedAt: string // 会话结束时间
+  status: 'completed' | 'in_progress' | 'abandoned' // 会话状态
+  summary: string // 会话整体摘要
+  keyResults: string[] // 本次会话达成的关键结果
+  pendingWork: string[] // 尚未完成、后续待跟进的工作
+  filesModified: string[] // 本次会话修改过的文件列表
+  decisions: string[] // 会话中形成的关键决策
 }
 
-// ─── Model aliases ───
+// ─── 模型别名 ───
 
 export const MODEL_ALIASES: Record<string, string> = {
   fable: 'anthropic:claude-fable-5',
@@ -333,7 +297,7 @@ export const MODEL_ALIASES: Record<string, string> = {
   kimi: 'moonshotai:kimi-k2.6',
 }
 
-// ─── Provider detection order (for smart defaults) ───
+// ─── Provider 检测顺序（用于智能默认值） ───
 
 export const PROVIDER_DETECTION_ORDER = [
   { envKey: 'DEEPSEEK_API_KEY', defaultModel: 'deepseek:deepseek-v4-flash' },
@@ -346,92 +310,92 @@ export const PROVIDER_DETECTION_ORDER = [
   { envKey: 'MOONSHOT_API_KEY', defaultModel: 'moonshotai:kimi-k2.6' },
 ] as const
 
-// ─── Curated model catalog per provider (for interactive /model picker) ───
+// ─── 每个 Provider 的精选模型目录（用于交互式 /model 选择器） ───
 
 export interface ProviderModel {
-  /** Full `<provider>:<model>` id passed to AI SDK */
-  id: string
-  /** Short display label shown in the picker */
-  label: string
-  /** One-line description shown under the label */
-  description: string
+  /** 传给 AI SDK 的完整 `<provider>:<model>` 标识。 */
+  id: string // 模型完整 ID
+  /** 在模型选择器中展示的短标签。 */
+  label: string // 模型短名称
+  /** 展示在标签下方的一行说明。 */
+  description: string // 模型简短描述
 }
 
 /**
- * Hand-curated models per provider. Only models we've tested or that are
- * advertised as production-stable make the list — agents tend to pick
- * whatever is visible, so we don't dump every experimental variant here.
- * Users who need something exotic can still type the full id into
- * `/model <provider>:<model>` or pass it via `--model`.
+ * 每个 provider 的手工精选模型列表。只有我们测试过，或官方明确标注为
+ * 生产稳定的模型才会进入这里。因为代理往往会优先选择“看得见的”模型，
+ * 所以这里不会把各种实验型号一股脑全倒进来。
+ * 如果用户确实要用冷门型号，仍然可以手动输入完整 id：
+ * `/model <provider>:<model>` 或通过 `--model` 传入。
  */
 export const PROVIDER_MODELS: Record<string, readonly ProviderModel[]> = {
   anthropic: [
     {
       id: 'anthropic:claude-fable-5',
       label: 'Fable 5',
-      description: 'Most capable model, strongest reasoning + agentic, 1M context',
+      description: '能力最强的模型，推理与代理能力最完整，支持 1M 上下文',
     },
     {
       id: 'anthropic:claude-opus-4-8',
       label: 'Opus 4.8',
-      description: 'Top Opus-tier, complex reasoning + agentic coding, 1M context',
+      description: '顶级 Opus 档，适合复杂推理与代理式编码，支持 1M 上下文',
     },
     {
       id: 'anthropic:claude-sonnet-4-6',
       label: 'Sonnet 4.6',
-      description: 'Balanced speed + intelligence, 1M context',
+      description: '速度与智能较均衡，支持 1M 上下文',
     },
-    { id: 'anthropic:claude-haiku-4-5', label: 'Haiku 4.5', description: 'Fastest, cheapest — shorter replies' },
+    { id: 'anthropic:claude-haiku-4-5', label: 'Haiku 4.5', description: '最快也最便宜，回复通常更短' },
   ],
   openai: [
-    { id: 'openai:gpt-5.5', label: 'GPT-5.5', description: 'Flagship, complex reasoning + coding' },
-    { id: 'openai:gpt-5.4-mini', label: 'GPT-5.4 Mini', description: 'Strong mini model, coding + agents' },
-    { id: 'openai:gpt-4.1', label: 'GPT-4.1', description: 'General-purpose, 1M context window' },
-    { id: 'openai:gpt-4.1-mini', label: 'GPT-4.1 Mini', description: 'Cheaper tier of 4.1, 1M context' },
-    { id: 'openai:o3', label: 'o3', description: 'Reasoning model — retiring Aug 2026' },
-    { id: 'openai:o4-mini', label: 'o4-mini', description: 'Smaller reasoning model' },
+    { id: 'openai:gpt-5.5', label: 'GPT-5.5', description: '旗舰模型，适合复杂推理与编码' },
+    { id: 'openai:gpt-5.4-mini', label: 'GPT-5.4 Mini', description: '能力很强的小模型，适合编码与代理任务' },
+    { id: 'openai:gpt-4.1', label: 'GPT-4.1', description: '通用型模型，支持 1M 上下文窗口' },
+    { id: 'openai:gpt-4.1-mini', label: 'GPT-4.1 Mini', description: 'GPT-4.1 的更低成本版本，支持 1M 上下文' },
+    { id: 'openai:o3', label: 'o3', description: '推理模型，计划于 2026 年 8 月退役' },
+    { id: 'openai:o4-mini', label: 'o4-mini', description: '更轻量的推理模型' },
   ],
   deepseek: [
     {
       id: 'deepseek:deepseek-v4-flash',
       label: 'DeepSeek V4 Flash',
-      description: 'Fast, efficient general-purpose, 1M context',
+      description: '快速、高效的通用模型，支持 1M 上下文',
     },
     {
       id: 'deepseek:deepseek-v4-pro',
       label: 'DeepSeek V4 Pro',
-      description: 'Flagship, stronger reasoning, 1M context',
+      description: '旗舰型号，推理更强，支持 1M 上下文',
     },
   ],
   alibaba: [
-    { id: 'alibaba:qwen3.7-max', label: 'Qwen3.7 Max', description: 'Latest flagship, strongest Qwen' },
-    { id: 'alibaba:qwen3-coder-plus', label: 'Qwen3 Coder Plus', description: 'Tuned for coding tasks, 1M context' },
-    { id: 'alibaba:qwq-plus', label: 'QwQ Plus', description: 'Reasoning model' },
-    { id: 'alibaba:qwen3-max', label: 'Qwen3 Max', description: 'Previous flagship, 256k context' },
-    { id: 'alibaba:qwen-plus', label: 'Qwen Plus', description: 'Balanced cost/quality' },
-    { id: 'alibaba:qwen-turbo', label: 'Qwen Turbo', description: 'Cheapest, fast, 1M context' },
+    { id: 'alibaba:qwen3.7-max', label: 'Qwen3.7 Max', description: '最新旗舰，也是当前最强的 Qwen' },
+    { id: 'alibaba:qwen3-coder-plus', label: 'Qwen3 Coder Plus', description: '专为编码任务调优，支持 1M 上下文' },
+    { id: 'alibaba:qwq-plus', label: 'QwQ Plus', description: '偏推理能力的模型' },
+    { id: 'alibaba:qwen3-max', label: 'Qwen3 Max', description: '上一代旗舰，支持 256k 上下文' },
+    { id: 'alibaba:qwen-plus', label: 'Qwen Plus', description: '成本与质量较均衡' },
+    { id: 'alibaba:qwen-turbo', label: 'Qwen Turbo', description: '最便宜且速度快，支持 1M 上下文' },
   ],
   google: [
-    { id: 'google:gemini-3.5-flash', label: 'Gemini 3.5 Flash', description: 'Latest flagship, agentic + coding' },
-    { id: 'google:gemini-2.5-pro', label: 'Gemini 2.5 Pro', description: '1M context, strong long-doc handling' },
-    { id: 'google:gemini-2.5-flash', label: 'Gemini 2.5 Flash', description: 'Cheaper/faster tier, 1M context' },
+    { id: 'google:gemini-3.5-flash', label: 'Gemini 3.5 Flash', description: '最新旗舰，适合代理任务与编码' },
+    { id: 'google:gemini-2.5-pro', label: 'Gemini 2.5 Pro', description: '支持 1M 上下文，长文档处理能力强' },
+    { id: 'google:gemini-2.5-flash', label: 'Gemini 2.5 Flash', description: '更便宜也更快的层级，支持 1M 上下文' },
   ],
   xai: [
-    { id: 'xai:grok-4.3', label: 'Grok 4.3', description: 'Latest flagship, 1M context' },
-    { id: 'xai:grok-3', label: 'Grok 3', description: 'Previous gen (alias → grok-4.3)' },
+    { id: 'xai:grok-4.3', label: 'Grok 4.3', description: '最新旗舰，支持 1M 上下文' },
+    { id: 'xai:grok-3', label: 'Grok 3', description: '上一代别名（会映射到 grok-4.3）' },
   ],
   zhipu: [
-    { id: 'zhipu:glm-5.1', label: 'GLM-5.1', description: 'Latest flagship, 200k context, strong coding' },
-    { id: 'zhipu:glm-5', label: 'GLM-5', description: 'Agentic engineering model, 200k context' },
-    { id: 'zhipu:glm-4-plus', label: 'GLM-4 Plus', description: 'Previous gen, 128k context' },
+    { id: 'zhipu:glm-5.1', label: 'GLM-5.1', description: '最新旗舰，支持 200k 上下文，编码能力强' },
+    { id: 'zhipu:glm-5', label: 'GLM-5', description: '偏工程代理能力的模型，支持 200k 上下文' },
+    { id: 'zhipu:glm-4-plus', label: 'GLM-4 Plus', description: '上一代型号，支持 128k 上下文' },
   ],
   moonshotai: [
-    { id: 'moonshotai:kimi-k2.6', label: 'Kimi K2.6', description: 'Latest, strongest coding + agents' },
-    { id: 'moonshotai:kimi-k2.5', label: 'Kimi K2.5', description: 'Previous gen, 131k context' },
+    { id: 'moonshotai:kimi-k2.6', label: 'Kimi K2.6', description: '最新版本，编码与代理能力最强' },
+    { id: 'moonshotai:kimi-k2.5', label: 'Kimi K2.5', description: '上一代型号，支持 131k 上下文' },
   ],
 }
 
-// ─── Provider API key URLs ───
+// ─── Provider API Key 获取入口 ───
 
 export const PROVIDER_KEY_URLS: Record<string, string> = {
   anthropic: 'https://console.anthropic.com/',
@@ -444,11 +408,11 @@ export const PROVIDER_KEY_URLS: Record<string, string> = {
   moonshotai: 'https://platform.moonshot.ai/console/api-keys',
 }
 
-// ─── Re-export AI SDK types ───
+// ─── 重新导出 AI SDK 类型 ───
 
 export type { ModelMessage, LanguageModel }
 
-// ─── Re-export sub-agent types ───
+// ─── 重新导出子代理相关类型 ───
 
 export type { SubAgentEvent, SubAgentDefinition, SubAgentTrace } from '../agent/sub-agents/types.js'
 export type { SubAgentRegistry } from '../agent/sub-agents/registry.js'

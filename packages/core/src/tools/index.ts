@@ -1,13 +1,11 @@
-// @x-code-cli/core — Tool registry (unified export)
+// @x-code-cli/core — 工具注册表（统一导出）
 //
-// Memory writes are NOT exposed as a tool — they happen silently via the
-// post-turn extractor (`agent/memory-extractor.ts` → `generateText` +
-// `Output.object` → `getAutoMemory().add()`). This matches Codex's "main
-// agent is read-only for memory" philosophy: any visible memory-write tool
-// row in the frame would feel like AI-doing-things-behind-the-user's-back.
-// Claude Code takes a different route (memories are markdown files written
-// via the generic Write tool, with UI collapse), but that requires a
-// separate collapse path we'd rather not maintain.
+// Memory 写入不会暴露成一个显式工具；它是在 turn 结束后由提取器静默完成的
+// （`agent/memory-extractor.ts` → `generateText` + `Output.object` →
+// `getAutoMemory().add()`）。这符合 Codex“主代理对记忆只读”的设计理念：
+// 如果界面里出现一个可见的 memory-write 工具条目，会让人感觉像 AI 在背着用户做事。
+// Claude Code 走的是另一条路（把记忆当作 Markdown 文件，通过通用 Write 工具写入，
+// 然后在 UI 里折叠），但那需要额外维护一套折叠路径，这里不打算引入。
 import { askUser } from './ask-user.js'
 import { edit } from './edit.js'
 import { enterPlanMode } from './enter-plan-mode.js'

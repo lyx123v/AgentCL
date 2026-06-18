@@ -1,4 +1,4 @@
-// Tests for plugin → existing-loader integration
+// plugin 与现有 loader 的集成测试
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import fs from 'node:fs/promises'
@@ -11,6 +11,7 @@ import { loadAllPlugins } from '../src/plugins/loader.js'
 
 let originalPluginsDir: string | undefined
 
+// 以 UTF-8 写入文件，并自动创建父目录。
 async function writeFileAt(file: string, body: string): Promise<void> {
   await fs.mkdir(path.dirname(file), { recursive: true })
   await fs.writeFile(file, body, 'utf-8')
@@ -28,8 +29,8 @@ afterEach(() => {
 })
 
 describe('buildPluginIntegration', () => {
-  it('lists skill + agent dirs for each enabled plugin (resolved absolute)', async () => {
-    // Build a source plugin tree with skills/ and agents/ dirs
+  it('会列出每个启用插件的 skill 与 agent 目录（解析为绝对路径）', async () => {
+    // 构造一个带有 skills/ 与 agents/ 目录的插件树。
     const src = await fs.mkdtemp(path.join(os.tmpdir(), 'xc-int-plugin-src-'))
     await writeFileAt(
       path.join(src, 'plugin.json'),
@@ -50,7 +51,7 @@ describe('buildPluginIntegration', () => {
     expect(out.agentsDirs[0]!.dir).toContain('agents')
   })
 
-  it('surfaces commandsDirs for any plugin with a commands/ contribution', async () => {
+  it('会暴露拥有 commands/ 贡献的插件 commandsDirs', async () => {
     const src = await fs.mkdtemp(path.join(os.tmpdir(), 'xc-int-plugin-src-'))
     await writeFileAt(
       path.join(src, 'plugin.json'),
@@ -67,7 +68,7 @@ describe('buildPluginIntegration', () => {
     expect(out.commandsDirs[0]!.pluginRoot).toBeDefined()
   })
 
-  it('builds a HookRegistry from inline hooks contributions', async () => {
+  it('会根据内联 hooks 贡献构建 HookRegistry', async () => {
     const src = await fs.mkdtemp(path.join(os.tmpdir(), 'xc-int-plugin-src-'))
     await writeFileAt(
       path.join(src, 'plugin.json'),
@@ -90,14 +91,14 @@ describe('buildPluginIntegration', () => {
     expect(out.hookErrors).toEqual([])
   })
 
-  it('records hook config parse errors per plugin without crashing the rest', async () => {
+  it('会按插件记录 hook 配置解析错误，而不会拖垮其他插件', async () => {
     const bad = await fs.mkdtemp(path.join(os.tmpdir(), 'xc-int-plugin-bad-'))
     await writeFileAt(
       path.join(bad, 'plugin.json'),
       JSON.stringify({
         name: 'badhook',
         version: '1.0.0',
-        // missing command — schema rejects
+        // 缺少 command，schema 应该拒绝。
         hooks: { PreToolUse: [{ matcher: 'edit_file' }] },
       }),
     )
@@ -111,7 +112,7 @@ describe('buildPluginIntegration', () => {
     expect(out.hookRegistry.list()).toHaveLength(0)
   })
 
-  it('parses path-style mcpServers from a JSON file at the plugin root', async () => {
+  it('会从插件根目录的 JSON 文件解析路径式 mcpServers', async () => {
     const src = await fs.mkdtemp(path.join(os.tmpdir(), 'xc-int-plugin-src-'))
     await writeFileAt(
       path.join(src, 'plugin.json'),
@@ -127,9 +128,9 @@ describe('buildPluginIntegration', () => {
     expect((out.mcpServers.gh as { command?: string }).command).toBe('gh-mcp')
   })
 
-  it("accepts a flat `.mcp.json` (no `mcpServers` wrapper) — Claude Code's official plugin shape", async () => {
-    // linear@anthropic-marketplace ships .mcp.json as a flat `name → cfg`
-    // map without a `mcpServers` wrapper. We used to silently drop it.
+  it('会接受扁平 `.mcp.json`（没有 `mcpServers` 包装），兼容 Claude Code 官方插件形态', async () => {
+    // linear@anthropic-marketplace 的 .mcp.json 是扁平的 `name -> cfg`
+    // 映射，没有 `mcpServers` 包装层。我们以前会悄悄把它丢掉。
     const src = await fs.mkdtemp(path.join(os.tmpdir(), 'xc-int-plugin-flat-mcp-'))
     await writeFileAt(path.join(src, 'plugin.json'), JSON.stringify({ name: 'linearish', version: '1.0.0' }))
     await writeFileAt(
@@ -146,8 +147,8 @@ describe('buildPluginIntegration', () => {
     expect((out.mcpServers.linear as { url?: string }).url).toBe('https://mcp.linear.app/mcp')
   })
 
-  it('resolves mcpServers name collisions first-wins + records the loser', async () => {
-    // Two plugins both contribute a server named "gh"
+  it('遇到 mcpServers 同名冲突时会采用先到先得，并记录被丢弃的一方', async () => {
+    // 两个插件都贡献了名为 "gh" 的服务。
     const srcA = await fs.mkdtemp(path.join(os.tmpdir(), 'xc-int-plugin-srcA-'))
     await writeFileAt(
       path.join(srcA, 'plugin.json'),
@@ -173,7 +174,7 @@ describe('buildPluginIntegration', () => {
     const cwd = await fs.mkdtemp(path.join(os.tmpdir(), 'xc-int-cwd-'))
     const out = await buildPluginIntegration(await loadAllPlugins({ cwd }))
 
-    // First install wins (installed_plugins.json order)
+    // 先安装的插件获胜（按 installed_plugins.json 顺序）。
     expect((out.mcpServers.gh as { command?: string }).command).toBe('first-cmd')
     expect(out.mcpCollisions).toHaveLength(1)
     expect(out.mcpCollisions[0]).toEqual({
@@ -183,14 +184,14 @@ describe('buildPluginIntegration', () => {
     })
   })
 
-  it('records mcp parse errors per plugin without killing the others', async () => {
+  it('会按插件记录 mcp 解析错误，而不会影响其他插件', async () => {
     const bad = await fs.mkdtemp(path.join(os.tmpdir(), 'xc-int-plugin-bad-'))
     await writeFileAt(
       path.join(bad, 'plugin.json'),
       JSON.stringify({
         name: 'badmcp',
         version: '1.0.0',
-        // Has neither command nor url — mcp config schema must reject this entry
+        // 既没有 command 也没有 url，mcp 配置 schema 必须拒绝这个条目。
         mcpServers: { broken: { args: ['x'] } },
       }),
     )
@@ -212,11 +213,11 @@ describe('buildPluginIntegration', () => {
 
     expect(out.mcpErrors).toHaveLength(1)
     expect(out.mcpErrors[0]!.pluginId).toBe('badmcp@local')
-    // Good plugin's server still landed
+    // 正常插件的服务仍应成功进入结果。
     expect(out.mcpServers.ok).toBeDefined()
   })
 
-  it('skips contributions from disabled plugins', async () => {
+  it('会跳过来自已禁用插件的贡献', async () => {
     const src = await fs.mkdtemp(path.join(os.tmpdir(), 'xc-int-plugin-src-'))
     await writeFileAt(
       path.join(src, 'plugin.json'),
@@ -225,7 +226,7 @@ describe('buildPluginIntegration', () => {
     await installPlugin({ source: { kind: 'local', path: src }, marketplace: 'local' })
 
     const cwd = await fs.mkdtemp(path.join(os.tmpdir(), 'xc-int-cwd-'))
-    // Disable the plugin via project settings
+    // 通过项目设置禁用该插件。
     await writeFileAt(
       path.join(cwd, '.x-code', 'settings.local.json'),
       JSON.stringify({ enabledPlugins: { 'demo@local': false } }),

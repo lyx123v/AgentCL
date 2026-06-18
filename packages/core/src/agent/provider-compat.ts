@@ -1,4 +1,4 @@
-// @x-code-cli/core — Provider-specific compatibility shims
+// @x-code-cli/core — 面向不同 provider 的兼容性修正
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -9,18 +9,10 @@ import { capabilitiesOf } from '../providers/capabilities.js'
 import { ocrImage } from './file-ingest.js'
 
 /**
- * Ensure all assistant messages have a reasoning content part.
+ * 确保所有 assistant 消息都带有 reasoning content part。
  *
- * DeepSeek V4 models in thinking mode require the `reasoning_content` field on
- * every assistant message during tool-call chains. The upstream
- * `@ai-sdk/deepseek` converter sets `reasoning_content: undefined` when no
- * reasoning part exists, and `JSON.stringify` strips `undefined` values —
- * causing the DeepSeek API to reject the request with a 400
- * "Missing reasoning_content" error.
- *
- * This helper injects an empty `{ type: 'reasoning', text: '' }` part into any
- * assistant message that lacks one, so the converter always produces
- * `"reasoning_content": ""` in the JSON body.
+ * DeepSeek V4 在 thinking 模式下要求工具调用链中的每条 assistant 消息都带
+ * `reasoning_content` 字段。这里会在缺失时自动补一个空 reasoning part。
  */
 export function ensureReasoningContentParts(messages: ModelMessage[], modelId: string): void {
   if (!modelId.includes('deepseek-v4')) return
@@ -38,41 +30,35 @@ export function ensureReasoningContentParts(messages: ModelMessage[], modelId: s
   }
 }
 
-// ── Image/PDF downgrade for text-only providers ───────────────────────────
+// ── 面向纯文本 provider 的图片 / PDF 降级处理 ───────────────────────────
 //
-// If the active provider can't receive image/file parts (DeepSeek today,
-// plus `custom` unless the user opts in), walk every message that would be
-// sent on the next turn and replace each binary part with something the
-// provider CAN accept.
+// 如果当前 provider 不能接收 image/file part（例如某些 DeepSeek 或 custom
+// 配置），这里会遍历下一轮即将发送的消息，把二进制内容改写成 provider
+// 能接受的文本形式。
 //
-// Two flavors:
-//   - User messages: ImagePart / FilePart → TextPart with OCR'd text.
-//   - Tool result messages: `content` value array with `image-data`
-//     entries → same content array but with image entries replaced by
-//     `text` entries (OCR'd).
+// 分两类处理：
+//   - 用户消息：ImagePart / FilePart → 含 OCR 文本的 TextPart
+//   - 工具结果消息：把 `image-data` 等二进制条目改写成文本条目
 //
-// OCR runs locally via tesseract.js. Results are memoized by a content
-// hash so repeatedly sending the same image across turns doesn't re-run
-// OCR on every turn.
+// OCR 通过本地 tesseract.js 完成，并按内容哈希做缓存，避免同一图片在多轮中反复识别。
 
 type MaybeOutput = { type?: string; value?: unknown; filename?: string }
 
-// Cap OCR cache so a long session that pages through many distinct images
-// doesn't grow the heap unboundedly. Map preserves insertion order, so we
-// can evict the oldest entry by reading `keys().next()` — that's our LRU.
-// Re-inserting a hit (via delete+set) bumps it to the most-recent slot.
+// 对 OCR 缓存做上限控制，避免长会话浏览大量不同图片时内存无限增长。
 const OCR_CACHE_LIMIT = 50
 const ocrCache = new Map<string, string>()
 
+/** 从 OCR 缓存中读取并刷新最近使用顺序。 */
 function ocrCacheGet(key: string): string | undefined {
   const hit = ocrCache.get(key)
   if (hit === undefined) return undefined
-  // Touch: move to most-recent slot.
+  // 命中后刷新到最近使用位置。
   ocrCache.delete(key)
   ocrCache.set(key, hit)
   return hit
 }
 
+/** 写入 OCR 缓存，并在超出上限时淘汰最旧条目。 */
 function ocrCacheSet(key: string, value: string): void {
   if (ocrCache.has(key)) ocrCache.delete(key)
   ocrCache.set(key, value)
@@ -82,13 +68,14 @@ function ocrCacheSet(key: string, value: string): void {
   }
 }
 
+/** 把图片 Buffer 先落到临时文件，再复用 `ocrImage` 完成 OCR。 */
 async function ocrBuffer(buffer: Buffer): Promise<string> {
   const key = `${buffer.length}:${buffer.subarray(0, 64).toString('base64')}`
   const cached = ocrCacheGet(key)
   if (cached != null) return cached
 
-  // tesseract.js takes a path, URL, or Buffer. Buffers work but some
-  // versions have edge cases — writing to a tmp file is universally safe.
+  // tesseract.js 理论上支持 Buffer，但某些版本存在边缘问题；
+  // 先写入临时文件是更稳妥的做法。
   const tmp = path.join(os.tmpdir(), `xcc-ocr-${Date.now()}-${Math.random().toString(36).slice(2)}.png`)
   try {
     await fs.writeFile(tmp, buffer)
@@ -100,12 +87,13 @@ async function ocrBuffer(buffer: Buffer): Promise<string> {
   }
 }
 
+/** 把 ImagePart 中可能出现的多种图片载体统一转换成 Buffer。 */
 function imagePartToBuffer(part: { image: unknown; mediaType?: string }): Buffer | null {
   const img = part.image
   if (Buffer.isBuffer(img)) return img
   if (img instanceof Uint8Array) return Buffer.from(img)
   if (typeof img === 'string') {
-    // Could be base64 or a data URL. Strip the `data:...;base64,` prefix if present.
+    // 可能是 base64 字符串，也可能是 data URL；这里会去掉 data URL 前缀。
     const commaIdx = img.indexOf(',')
     const data = img.startsWith('data:') && commaIdx > 0 ? img.slice(commaIdx + 1) : img
     try {
@@ -117,18 +105,14 @@ function imagePartToBuffer(part: { image: unknown; mediaType?: string }): Buffer
   return null
 }
 
-/**
- * Strip binary content parts from the conversation history in-place so that
- * the next `streamText` call doesn't 400 on a provider that can't accept
- * them. Replaces images with OCR'd text annotated as a fallback so the
- * model knows it's looking at text, not the image itself.
- */
+/** 原地剥离对当前 provider 不兼容的二进制内容。
+ *  目标是保证下一次 `streamText` 不会因为图片或文件 part 而直接 400。 */
 export async function downgradeBinaryPartsForProvider(messages: ModelMessage[], modelId: string): Promise<void> {
   const caps = capabilitiesOf(modelId)
   if (caps.image && caps.pdf) return
 
   for (const msg of messages) {
-    // User messages — content may be an array of TextPart | ImagePart | FilePart.
+    // 用户消息：content 可能由 TextPart / ImagePart / FilePart 混合组成。
     if (msg.role === 'user' && Array.isArray(msg.content)) {
       const rewritten: typeof msg.content = []
       for (const part of msg.content) {
@@ -137,14 +121,14 @@ export async function downgradeBinaryPartsForProvider(messages: ModelMessage[], 
           const text = buffer ? await ocrBuffer(buffer) : '[image omitted]'
           rewritten.push({
             type: 'text',
-            text: `[Image replaced by local OCR — the current model cannot natively see images. Visual content is NOT visible.]\n${text}`,
+            text: `[图片已替换为本地 OCR 文本：当前模型不支持原生看图，视觉内容本身不可见。]\n${text}`,
           })
           continue
         }
         if (part.type === 'file' && !caps.pdf) {
           rewritten.push({
             type: 'text',
-            text: `[File omitted: ${(part as { filename?: string }).filename ?? 'unknown'} — current model does not accept file attachments.]`,
+            text: `[文件已省略：${(part as { filename?: string }).filename ?? 'unknown'}。当前模型不接受文件附件。]`,
           })
           continue
         }
@@ -154,7 +138,7 @@ export async function downgradeBinaryPartsForProvider(messages: ModelMessage[], 
       continue
     }
 
-    // Tool result messages — content is always an array of tool-result parts.
+    // 工具结果消息：content 固定是 tool-result part 数组。
     if (msg.role === 'tool' && Array.isArray(msg.content)) {
       for (const part of msg.content) {
         if (part.type !== 'tool-result') continue
@@ -176,18 +160,18 @@ export async function downgradeBinaryPartsForProvider(messages: ModelMessage[], 
               const buffer = Buffer.from(data, 'base64')
               text = await ocrBuffer(buffer)
             } catch {
-              // fall through with placeholder
+              // 保留占位文本继续向下执行。
             }
             rewritten.push({
               type: 'text',
-              text: `[Image replaced by local OCR — the current model cannot natively see images.]\n${text}`,
+              text: `[图片已替换为本地 OCR 文本：当前模型不支持原生看图。]\n${text}`,
             })
             continue
           }
           if ((entry.type === 'file-data' || entry.type === 'file-url' || entry.type === 'file-id') && !caps.pdf) {
             rewritten.push({
               type: 'text',
-              text: `[File attachment omitted (${entry.filename ?? entry.mediaType ?? 'binary'}) — current model does not accept file attachments.]`,
+              text: `[文件附件已省略（${entry.filename ?? entry.mediaType ?? 'binary'}）：当前模型不接受文件附件。]`,
             })
             continue
           }

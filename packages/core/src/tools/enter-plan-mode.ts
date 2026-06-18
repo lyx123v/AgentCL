@@ -1,115 +1,110 @@
-// @x-code-cli/core — enterPlanMode tool (mode switch, no execute — handled in agent loop)
+// @x-code-cli/core — enterPlanMode 工具（模式切换，不提供 execute，由 agent loop 处理）
 import { tool } from 'ai'
 
 import { z } from 'zod'
 
-/** The tool description below is the heart of plan-mode auto-trigger
- *  behavior — it's what the model reads in the tool list and uses to
- *  decide whether to recommend plan mode. Ported (with naming
- *  adjustments for our tool surface) from Claude Code's
- *  `EnterPlanModeTool/prompt.ts` external-user prompt
- *  (`/d/res/claude-code/src/tools/EnterPlanModeTool/prompt.ts:16-99`).
+/** 下方这段工具描述是“计划模式自动触发”的核心。
+ *  模型会直接读取工具列表里的这段文字，并据此判断是否应该推荐计划模式。
+ *  它移植自 Claude Code 的
+ *  `EnterPlanModeTool/prompt.ts` 外部用户提示
+ *  （`/d/res/claude-code/src/tools/EnterPlanModeTool/prompt.ts:16-99`），
+ *  只是按我们的工具命名做了调整。
  *
- *  WHY THIS IS LONG: a one-line description ("use for complex tasks")
- *  produces a model that almost never calls the tool — it has no
- *  concrete trigger pattern to match against the user's request. CC's
- *  prompt deliberately includes 7 numbered criteria, multiple worked
- *  examples per criterion, and an explicit "PREFER plan mode unless
- *  simple" anchor — that's what gets the model to actually recommend
- *  plan mode for refactors, new features, architectural decisions,
- *  etc. The token cost (~600 tokens in tool list each turn) is what
- *  buys the auto-trigger behavior; without it plan mode is dead UX.
+ *  之所以写得这么长，是因为一句“复杂任务时使用”几乎不会让模型真正调用它，
+ *  模型缺少可匹配用户请求的具体触发模式。Claude Code 的原始提示里刻意加入了
+ *  7 条编号标准、每条标准的多个示例，以及“除非任务很简单，否则优先进入计划模式”
+ *  这样的明确锚点，这样模型才会在重构、新功能、架构决策等场景中稳定推荐计划模式。
+ *  每轮工具列表多出的这部分 token 成本，换来的正是自动触发能力；没有它，计划模式的体验会很弱。
  *
- *  No `execute` field — the side-effect (asking the user to confirm,
- *  mutating LoopState.permissionMode, invalidating the system-prompt
- *  cache) is handled manually in `processToolCalls`. Same pattern as
- *  `askUser`. */
+ *  这里不提供 `execute` 字段。副作用（向用户请求确认、修改
+ *  `LoopState.permissionMode`、让 system-prompt cache 失效）都在
+ *  `processToolCalls` 中手动处理，和 `askUser` 的模式一致。 */
 export const enterPlanMode = tool({
-  description: `Use this tool proactively when you're about to start a non-trivial implementation task. Getting user sign-off on your approach before writing code prevents wasted effort and ensures alignment. This tool transitions you into plan mode where you can explore the codebase and design an implementation approach for user approval.
+  description: `当你即将开始一个不算简单的实现任务时，应主动使用这个工具。在写代码前先让用户确认你的实现思路，可以避免返工并确保双方对方向达成一致。这个工具会把你切换到计划模式，在那里你可以先探索代码库，再设计方案并交给用户审批。
 
-## When to Use This Tool
+## 何时使用这个工具
 
-**Prefer using enterPlanMode** for implementation tasks unless they're simple. Use it when ANY of these conditions apply:
+除非任务非常简单，否则对实现类任务应优先考虑使用 `enterPlanMode`。只要满足以下任一条件，就应使用它：
 
-1. **New Feature Implementation**: Adding meaningful new functionality
-   - Example: "Add a logout button" - where should it go? What should happen on click?
-   - Example: "Add form validation" - what rules? What error messages?
+1. **新功能实现**：要新增有实际意义的功能
+   - 例如：“加一个退出登录按钮”——放在哪里？点击后要发生什么？
+   - 例如：“增加表单校验”——校验规则是什么？错误提示怎么写？
 
-2. **Multiple Valid Approaches**: The task can be solved in several different ways
-   - Example: "Add caching to the API" - could use Redis, in-memory, file-based, etc.
-   - Example: "Improve performance" - many optimization strategies possible
+2. **存在多种合理方案**：任务可以用多种方式完成
+   - 例如：“给 API 增加缓存”——可以用 Redis、内存缓存、文件缓存等
+   - 例如：“优化性能”——可能存在多种优化策略
 
-3. **Code Modifications**: Changes that affect existing behavior or structure
-   - Example: "Update the login flow" - what exactly should change?
-   - Example: "Refactor this component" - what's the target architecture?
+3. **会修改现有代码行为或结构**：变更会影响当前逻辑
+   - 例如：“更新登录流程”——具体要改哪里？
+   - 例如：“重构这个组件”——目标架构是什么？
 
-4. **Architectural Decisions**: The task requires choosing between patterns or technologies
-   - Example: "Add real-time updates" - WebSockets vs SSE vs polling
-   - Example: "Implement state management" - Redux vs Context vs custom solution
+4. **涉及架构决策**：需要在模式或技术之间做取舍
+   - 例如：“增加实时更新”——WebSocket、SSE 还是轮询？
+   - 例如：“实现状态管理”——Redux、Context 还是自定义方案？
 
-5. **Multi-File Changes**: The task will likely touch more than 2-3 files
-   - Example: "Refactor the authentication system"
-   - Example: "Add a new API endpoint with tests"
+5. **多文件改动**：很可能会触及 2-3 个以上文件
+   - 例如：“重构认证系统”
+   - 例如：“新增一个 API 接口并补上测试”
 
-6. **Unclear Requirements**: You need to explore before understanding the full scope
-   - Example: "Make the app faster" - need to profile and identify bottlenecks
-   - Example: "Fix the bug in checkout" - need to investigate root cause
+6. **需求不够清晰**：需要先探索才能理解完整范围
+   - 例如：“让应用更快”——需要先分析瓶颈
+   - 例如：“修复结算页的 bug”——需要先调查根因
 
-7. **User Preferences Matter**: The implementation could reasonably go multiple ways
-   - If you would use askUser to clarify the approach, use enterPlanMode instead
-   - Plan mode lets you explore first, then present options with context
+7. **用户偏好会影响实现**：实现方向存在合理分歧
+   - 如果你本来会用 `askUser` 来确认实现路径，那通常更应该先用 `enterPlanMode`
+   - 计划模式允许你先探索，再带着上下文向用户展示选项
 
-## When NOT to Use This Tool
+## 何时不要使用这个工具
 
-Only skip enterPlanMode for simple tasks:
-- Single-line or few-line fixes (typos, obvious bugs, small tweaks)
-- Adding a single function with clear requirements
-- Tasks where the user has given very specific, detailed instructions
-- Pure research / "what does X do" questions — just answer them directly
+只有在简单任务中才跳过 `enterPlanMode`：
+- 单行或几行的小修复（错别字、明显 bug、小调整）
+- 明确需求下新增一个简单函数
+- 用户已经给出了非常具体、非常详细的指令
+- 纯研究 / 问答类问题，比如“X 是干什么的？”——直接回答即可
 
-## What Happens in Plan Mode
+## 进入计划模式后会发生什么
 
-In plan mode, you'll:
-1. Thoroughly explore the codebase using readFile, glob, grep, and listDir
-2. Understand existing patterns and architecture
-3. Design an implementation approach
-4. Use askUser to clarify approaches with the user when needed
-5. Write the plan incrementally to a session-scoped plan file
-6. Exit plan mode with exitPlanMode when ready to implement
+在计划模式中，你会：
+1. 使用 `readFile`、`glob`、`grep`、`listDir` 充分探索代码库
+2. 理解现有模式和架构
+3. 设计实现方案
+4. 必要时用 `askUser` 与用户澄清方案方向
+5. 逐步把计划写入当前会话专属的计划文件
+6. 准备开始实现时，用 `exitPlanMode` 退出计划模式
 
-## Examples
+## 示例
 
-### GOOD - Use enterPlanMode:
-User: "Add user authentication to the app"
-- Requires architectural decisions (session vs JWT, where to store tokens, middleware structure)
+### 适合使用 enterPlanMode：
+用户：“给应用加上用户认证”
+- 需要架构决策（session 还是 JWT、token 放哪里、中间件怎么组织）
 
-User: "Optimize the database queries"
-- Multiple approaches possible, need to profile first, significant impact
+用户：“优化数据库查询”
+- 可能有多种做法，需要先分析，且影响较大
 
-User: "Implement dark mode"
-- Architectural decision on theme system, affects many components
+用户：“实现深色模式”
+- 涉及主题系统设计，并会影响很多组件
 
-User: "Add a delete button to the user profile"
-- Seems simple but involves: where to place it, confirmation dialog, API call, error handling, state updates
+用户：“给用户资料页加一个删除按钮”
+- 看起来简单，但实际上涉及位置、确认弹窗、API 调用、错误处理、状态更新等
 
-User: "Update the error handling in the API"
-- Affects multiple files, user should approve the approach
+用户：“更新 API 的错误处理”
+- 会影响多个文件，适合先让用户确认方案
 
-### BAD - Don't use enterPlanMode:
-User: "Fix the typo in the README"
-- Straightforward, no planning needed
+### 不适合使用 enterPlanMode：
+用户：“修复 README 里的错别字”
+- 很直接，不需要规划
 
-User: "Add a console.log to debug this function"
-- Simple, obvious implementation
+用户：“加一个 console.log 来调试这个函数”
+- 实现简单且明确
 
-User: "What files handle routing?"
-- Research / Q&A task, not implementation — just answer
+用户：“哪些文件负责路由？”
+- 这是研究 / 问答任务，不是实现任务，直接回答即可
 
-## Important Notes
+## 重要说明
 
-- This tool REQUIRES user approval — they must consent to entering plan mode (an approval dialog appears).
-- If unsure whether to use it, err on the side of planning — it's better to get alignment upfront than to redo work.
-- Do not call enterPlanMode if you are already in plan mode (check the system prompt; if you see plan-mode instructions you are already in it).`,
+- 这个工具需要用户批准，用户必须同意进入计划模式（界面会弹出确认框）。
+- 如果你不确定要不要用，宁可偏向先规划；提前对齐通常比返工更划算。
+- 如果你已经处于计划模式，就不要再次调用 `enterPlanMode`（查看 system prompt，如果已经出现计划模式说明，就说明你已经在其中了）。`,
   inputSchema: z.object({
     topic: z
       .string()
@@ -117,7 +112,7 @@ User: "What files handle routing?"
       .max(60)
       .optional()
       .describe(
-        'STRONGLY RECOMMENDED. A 3-5 word English filename slug summarizing the user\'s task. Lowercase, hyphen-separated, no spaces or special chars. The plan file is named `<topic>-<YYYYMMDD-HHMMSS>.md` so this makes the file identifiable in `ls .x-code/plans/`. Translate non-English requests into English keywords (e.g. user asks "重构这个项目" → topic: "refactor-x-code-cli"; user asks "加 OAuth 登录" → topic: "add-oauth-login"). Omit only when you genuinely cannot summarize — the file then falls back to timestamp-only naming.',
+        '强烈建议填写。使用 3-5 个英文单词组成的文件名 slug 来概括用户任务，要求全部小写、用连字符分隔、不要包含空格或特殊字符。计划文件会命名为 `<topic>-<YYYYMMDD-HHMMSS>.md`，这样在 `ls .x-code/plans/` 里更容易识别。非英文需求也请翻译成英文关键词（例如用户说“重构这个项目” -> `topic: "refactor-x-code-cli"`；用户说“加 OAuth 登录” -> `topic: "add-oauth-login"`）。只有在你确实无法概括时才留空，此时文件名会退回为仅时间戳形式。',
       ),
   }),
 })

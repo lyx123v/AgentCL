@@ -1,4 +1,4 @@
-// @x-code-cli/core — Hooks subsystem public surface
+// @x-code-cli/core — Hooks 子系统公开导出
 export type {
   DecisionEvent,
   HookConfig,

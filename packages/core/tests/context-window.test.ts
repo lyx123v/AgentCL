@@ -9,7 +9,7 @@ import {
 } from '../src/agent/context-window.js'
 
 describe('getContextWindow', () => {
-  it('returns exact value for known models', () => {
+  it('已知模型会返回精确的上下文窗口值', () => {
     expect(getContextWindow('anthropic:claude-opus-4-7')).toBe(1000000)
     expect(getContextWindow('openai:gpt-4.1')).toBe(1047576)
     expect(getContextWindow('google:gemini-2.5-flash')).toBe(1000000)
@@ -17,24 +17,24 @@ describe('getContextWindow', () => {
     expect(getContextWindow('alibaba:qwen-max')).toBe(32768)
   })
 
-  it('falls back to provider-level default for unknown models', () => {
+  it('未知模型会回退到 provider 级默认值', () => {
     expect(getContextWindow('anthropic:claude-unknown')).toBe(1000000)
     expect(getContextWindow('openai:gpt-99')).toBe(128000)
     expect(getContextWindow('google:gemini-99')).toBe(1000000)
   })
 
-  it('returns global default for completely unknown providers', () => {
+  it('完全未知的 provider 会返回全局默认值', () => {
     expect(getContextWindow('unknownprovider:somemodel')).toBe(128000)
   })
 })
 
 describe('getCompressionThreshold', () => {
-  it('is context window * COMPRESSION_TRIGGER_RATIO', () => {
+  it('等于 context window * COMPRESSION_TRIGGER_RATIO', () => {
     const window = getContextWindow('anthropic:claude-opus-4-7')
     expect(getCompressionThreshold('anthropic:claude-opus-4-7')).toBe(Math.floor(window * COMPRESSION_TRIGGER_RATIO))
   })
 
-  it('changes with model', () => {
+  it('会随着模型变化而变化', () => {
     const a = getCompressionThreshold('anthropic:claude-opus-4-7')
     const b = getCompressionThreshold('alibaba:qwen-max')
     expect(a).toBeGreaterThan(b)
@@ -42,27 +42,27 @@ describe('getCompressionThreshold', () => {
 })
 
 describe('getMaxOutputTokens', () => {
-  it('returns specific ceiling for known models', () => {
+  it('已知模型会返回指定的输出上限', () => {
     expect(getMaxOutputTokens('deepseek:deepseek-v4-flash')).toBe(131072)
     expect(getMaxOutputTokens('alibaba:qwen-turbo')).toBe(16384)
     expect(getMaxOutputTokens('alibaba:qwen-max')).toBe(8192)
   })
 
-  it('returns default for unknown models', () => {
+  it('未知模型会返回默认输出上限', () => {
     expect(getMaxOutputTokens('openai:gpt-4.1')).toBe(16384)
     expect(getMaxOutputTokens('unknownprovider:model')).toBe(16384)
   })
 })
 
 describe('estimateTokenCount', () => {
-  it('estimates tokens from string content', () => {
+  it('能从字符串内容估算 token 数', () => {
     const messages = [{ role: 'user' as const, content: 'hello world' }]
     const tokens = estimateTokenCount(messages)
     expect(tokens).toBeGreaterThan(0)
     expect(tokens).toBe(Math.ceil(11 / 3.0))
   })
 
-  it('estimates tokens from array content with text parts', () => {
+  it('能从包含 text part 的数组内容估算 token 数', () => {
     const messages = [
       {
         role: 'assistant' as const,
@@ -76,7 +76,7 @@ describe('estimateTokenCount', () => {
     expect(tokens).toBe(Math.ceil(11 / 3.0))
   })
 
-  it('ignores non-text parts in array content', () => {
+  it('会忽略数组内容中的非文本 part', () => {
     const messages = [
       {
         role: 'assistant' as const,

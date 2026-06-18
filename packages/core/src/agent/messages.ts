@@ -1,16 +1,16 @@
-// @x-code-cli/core — Message types and helpers
+// @x-code-cli/core — 消息类型与辅助函数
 import type { FilePart, ImagePart, ModelMessage, TextPart } from 'ai'
 
-/** Content accepted by a user message — a plain string for simple prompts,
- *  or a parts array for prompts that include attached images / files. */
+/** 用户消息可接受的内容类型。
+ *  简单输入可直接用字符串，带附件时使用 parts 数组。 */
 export type UserContent = string | Array<TextPart | ImagePart | FilePart>
 
-/** Create a user message */
+/** 创建一条用户消息。 */
 export function userMessage(content: UserContent): ModelMessage {
   return { role: 'user', content }
 }
 
-/** Create a tool result message */
+/** 创建一条工具结果消息。 */
 export function toolResultMessage(toolCallId: string, toolName: string, result: string): ModelMessage {
   return {
     role: 'tool',
@@ -25,20 +25,19 @@ export function toolResultMessage(toolCallId: string, toolName: string, result: 
   }
 }
 
-/** Standard error string returned to the model from a tool. The "Error: "
- *  prefix is load-bearing — handleToolCall checks for it via
- *  isToolErrorString to flip the scrollback line to red, and the model
- *  itself learns to read it as a failure marker. */
+/** 生成工具返回给模型的标准错误字符串。
+ *  注意这里必须保留 `"Error: "` 前缀，因为它既被 UI 用来标红，
+ *  也被模型当作失败标记来学习。 */
 export function toolErrorString(message: string): string {
   return `Error: ${message}`
 }
 
-/** Wrap a thrown / unknown value into the standard tool-error string. */
+/** 把任意异常值包装成标准工具错误字符串。 */
 export function toolErrorFromUnknown(err: unknown): string {
   return toolErrorString(err instanceof Error ? err.message : String(err))
 }
 
-/** Match the result-string prefix produced by toolErrorString. */
+/** 判断一段结果文本是否带有标准工具错误前缀。 */
 export function isToolErrorString(value: string): boolean {
   return value.startsWith('Error:')
 }

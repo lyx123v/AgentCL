@@ -1,7 +1,6 @@
-// @x-code-cli/core — Agent Loop (orchestration: streaming, tool calls, permission)
+// @x-code-cli/core — Agent 主循环（编排串流、工具调用与权限）
 //
-// Context compression lives in `./compression.ts`; this file just
-// orchestrates the per-turn streaming + tool dispatch loop.
+// 上下文压缩逻辑在 `./compression.ts`，这里主要负责编排每一轮的串流与工具分发。
 import fs from 'node:fs/promises'
 import path from 'node:path'
 
@@ -37,23 +36,14 @@ import { buildSystemPrompt } from './system-prompt.js'
 import { processToolCalls } from './tool-execution.js'
 import { repairOrphanToolCalls, truncateToolResultsInMessages } from './tool-result-sanitize.js'
 
-/** Prepend an injected context block to a UserContent payload. Used by
- *  the UserPromptSubmit hook decision: plugins can inject context (e.g.
- *  current sprint info) before the model sees the user's actual prompt.
- *  We prepend INTO the user message rather than insert a separate user
- *  message to avoid producing two consecutive user turns (some providers
- *  reject that — Claude refuses to alternate role==='user' twice). */
+/** 在用户消息前插入一段插件注入的上下文。 */
 function prependContext(userMessage: UserContent, context: string): UserContent {
   const block = `<plugin_context>\n${context}\n</plugin_context>\n\n`
   if (typeof userMessage === 'string') return block + userMessage
   return [{ type: 'text', text: block }, ...userMessage]
 }
 
-/** Pull plain text out of a UserContent payload for slugification.
- *  UserContent can be a string OR a multi-part array (text/image/file
- *  parts after `buildUserContent` ingests `@path` references); we only
- *  care about the text segments — image / file parts contribute
- *  nothing to a human-readable filename. */
+/** 从 UserContent 中提取纯文本，用于 slug 生成等元信息处理。 */
 function userContentToText(content: UserContent): string {
   if (typeof content === 'string') return content
   if (Array.isArray(content)) {
@@ -72,35 +62,21 @@ export type { LoopState } from './loop-state.js'
 // Re-exported for the CLI's resume / manual-compact path (see use-agent.ts).
 export { compressMessages } from './compression.js'
 
-/** What `agentLoop` returns to its caller.
- *
- *  - `state` is the long-lived session state (messages, tokenUsage, etc.).
- *    The main interactive CLI stores it in `loopStateRef` and feeds it
- *    back as `existingState` on the next user submit.
- *  - `turnCount` is how many rounds of streamText this single invocation
- *    ran. It's NOT on `state` because that would imply it accumulates
- *    across submits — it doesn't. Sub-agent runner and `--print` mode
- *    are the real consumers; the main interactive loop ignores it. */
+/** `agentLoop` 返回给调用方的结果。 */
 export interface AgentLoopResult {
+  /** 更新后的长生命周期会话状态。 */
   state: LoopState
+  /** 本次调用内部实际运行了多少轮。 */
   turnCount: number
 }
 
-/** Consume streamText output, dispatching chunks to the UI via callbacks.
- *  Reasoning-delta chunks (thinking-mode models — DeepSeek-reasoner, o1,
- *  etc.) are deliberately ignored: that's the model's internal chain of
- *  thought, not user-facing output. The final user-facing answer arrives
- *  as regular text-delta chunks. */
+/** 消费 `streamText` 输出，并通过回调把增量内容分发给 UI。 */
 async function streamChunksToUI(result: StreamResult, callbacks: AgentCallbacks): Promise<void> {
   for await (const chunk of result.fullStream) {
     if (chunk.type === 'error') {
-      // AI SDK doesn't throw from fullStream iteration on request failure —
-      // it enqueues this chunk and closes the stream (stream-text.ts:1910).
-      // Without this re-throw the loop completes normally, then
-      // `await result.response` rejects with NoOutputGeneratedError —
-      // user sees that generic message instead of the real provider error
-      // (e.g. "insufficient balance"). Throw the original wrapped error so
-      // the outer try/catch can pass it to classifyApiError.
+      // AI SDK 在请求失败时不会直接让 fullStream 迭代抛错，而是产出一个
+      // error chunk 后关闭流。这里要把原始错误重新抛出，避免后续只看到
+      // NoOutputGeneratedError 这种泛化包装。
       throw chunk.error instanceof Error ? chunk.error : new Error(String(chunk.error))
     }
     if (chunk.type === 'text-delta') {
@@ -110,16 +86,14 @@ async function streamChunksToUI(result: StreamResult, callbacks: AgentCallbacks)
     } else if (chunk.type === 'tool-call') {
       debugLog('stream.tool-call', `${chunk.toolName ?? ''} ${JSON.stringify(chunk.input ?? {})}`)
       const toolCallId = chunk.toolCallId ?? ''
-      // Register the progress side-channel BEFORE tools start executing —
-      // AI SDK will synchronously invoke `execute(input, { toolCallId })`
-      // for auto-executed tools right after this event, and those tools
-      // call reportProgress(toolCallId, ...) to stream status updates.
+      // 必须在工具真正执行前先挂上进度通道，因为某些自动执行工具会立刻
+      // 同步进入 execute，并在里面上报进度。
       if (toolCallId) {
         setProgressReporter(toolCallId, (msg) => callbacks.onToolProgress(toolCallId, msg))
       }
       callbacks.onToolCall(toolCallId, chunk.toolName ?? '', (chunk.input ?? {}) as Record<string, unknown>)
     } else if (chunk.type === 'tool-result') {
-      // Notify UI about auto-executed tool results (readFile, glob, grep, etc.)
+      // 把自动执行工具（如 readFile、glob、grep）的结果同步给 UI。
       const raw = typeof chunk.output === 'string' ? chunk.output : JSON.stringify(chunk.output ?? '')
       debugLog('stream.tool-result', `${chunk.toolCallId ?? ''} ${raw}`)
       if (chunk.toolCallId) clearProgressReporter(chunk.toolCallId)
@@ -127,12 +101,11 @@ async function streamChunksToUI(result: StreamResult, callbacks: AgentCallbacks)
     } else {
       debugLog('stream.other-chunk', chunk.type)
     }
-    // reasoning-delta / reasoning-start / reasoning-end: intentionally dropped from UI
-    // but logged above under stream.other-chunk so we can see them in debug mode.
+    // reasoning 相关 chunk 故意不展示给用户，只在 debug 日志里保留。
   }
 }
 
-/** Pull the response + usage off a completed stream and fold into state. */
+/** 从已完成的流式结果中提取响应与 usage，并合并回状态。 */
 async function collectTurnResponse(
   result: StreamResult,
   state: LoopState,
@@ -140,15 +113,9 @@ async function collectTurnResponse(
   callbacks: AgentCallbacks,
 ): Promise<string> {
   const response = await result.response
-  // CRITICAL: auto-executed tools (readFile / grep / glob / listDir / webFetch
-  // / webSearch) return their results through `response.messages` without
-  // passing through the manual `pushToolResult` path. Without a sanitizer
-  // pass here, reading an 800-line file or a grep that matched 2k times dumps
-  // the full content into `state.messages` and then rides along on every
-  // subsequent turn. The worst realized case before this sanitizer was a
-  // 9M-token context built from cumulative failed-shell stacks + unsliced
-  // file reads. Truncate here so the messages we persist match the per-tool
-  // budget used elsewhere in the loop.
+  // 关键点：自动执行工具的结果会直接进入 `response.messages`，不会经过手动
+  // pushToolResult。如果这里不清洗，大型文件读取或海量 grep 结果会直接污染
+  // `state.messages`，并拖累后续每一轮上下文。
   truncateToolResultsInMessages(response.messages)
   state.messages.push(...response.messages)
   ensureReasoningContentParts(state.messages, modelId)
@@ -157,28 +124,17 @@ async function collectTurnResponse(
   if (usage) {
     state.tokenUsage.inputTokens += usage.inputTokens ?? 0
     state.tokenUsage.outputTokens += usage.outputTokens ?? 0
-    // AI SDK v6 normalizes provider cache fields into inputTokenDetails:
-    //   cacheReadTokens  ← Anthropic cache_read_input_tokens / OpenAI cached_tokens
-    //   cacheWriteTokens ← Anthropic cache_creation_input_tokens (others: 0)
-    // Both are subsets of inputTokens, so we don't double-count into total.
+    // AI SDK v6 会把 provider 的缓存字段统一映射到 inputTokenDetails 中。
     state.tokenUsage.cacheReadTokens += usage.inputTokenDetails?.cacheReadTokens ?? 0
     state.tokenUsage.cacheCreationTokens += usage.inputTokenDetails?.cacheWriteTokens ?? 0
     state.tokenUsage.totalTokens = state.tokenUsage.inputTokens + state.tokenUsage.outputTokens
-    // Snapshot the current context-window occupancy from this response —
-    // overwrite, not accumulate. Includes input + output because every
-    // major provider (Anthropic, OpenAI, Google, DeepSeek, Moonshot,
-    // Alibaba, xAI) defines context window as the SHARED budget pool of
-    // input + output: input + output ≤ context_window is the architectural
-    // constraint (single KV-cache cap). AI SDK's `inputTokens` already
-    // includes cache_read + cache_write, so this is the full
-    // prompt-the-model-saw plus what it just wrote — directly comparable
-    // to `getContextWindow(modelId)` in the footer "N / M · X%" indicator.
-    // Cumulative counters above remain for /usage billing summaries.
+    // 这里记录的是“当前上下文占用快照”，不是累计值。主流 provider 的上下文
+    // 窗口本质上都共享输入与输出预算，因此这里直接用 input + output。
     state.tokenUsage.currentContextTokens = (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0)
     if (usage.inputTokens != null) state.lastInputTokens = usage.inputTokens
     callbacks.onUsageUpdate(state.tokenUsage)
 
-    // ── Cache break detection ──
+    // ── 缓存命中异常检测 ──
     const turnCacheRead = usage.inputTokenDetails?.cacheReadTokens ?? 0
     if (state.expectCacheMiss) {
       state.expectCacheMiss = false
@@ -190,10 +146,7 @@ async function collectTurnResponse(
     }
     state.prevTurnCacheRead = turnCacheRead
 
-    // Persist a usage snapshot inline with the jsonl transcript. Per-turn
-    // cadence: the picker's tail-scan only ever needs the LATEST entry, but
-    // we write every turn so a crashed process doesn't lose its final
-    // counts. Fire-and-forget — never blocks the loop.
+    // 把 usage 快照写入 jsonl，这样即便进程异常退出，也尽量保留最后一轮统计。
     void appendUsage(state, modelId)
   }
 
@@ -201,20 +154,16 @@ async function collectTurnResponse(
 }
 
 type TurnOutcome =
-  /** Turn completed normally; `finishReason` says what to do next. */
+  /** 本轮正常结束，后续动作由 `finishReason` 决定。 */
   | { kind: 'done'; finishReason: string; result: StreamResult }
-  /** Fatal error (already reported to callbacks); caller should break the loop. */
+  /** 致命错误，且已通过 callbacks 上报。 */
   | { kind: 'error' }
-  /** Context overflowed and was compressed; caller should retry this turn. */
+  /** 本轮因上下文溢出被压缩，调用方应重试。 */
   | { kind: 'retry' }
-  /** User aborted the request (Esc / Ctrl+C). NOT reported to onError —
-   *  the UI shows a `[Request interrupted by user]` notice instead. */
+  /** 用户主动中断请求。 */
   | { kind: 'aborted' }
 
-/** AbortError from streamText / fetch is the SDK's signal that we cancelled
- *  the request. We also accept any error that lands while abortSignal is
- *  already aborted — some providers wrap the underlying AbortError into their
- *  own error class but still flip the signal first. */
+/** 判断某个错误是否本质上表示“请求已被取消”。 */
 function isAbortError(err: unknown, signal: AbortSignal | undefined): boolean {
   if (signal?.aborted) return true
   if (err instanceof Error) {
@@ -224,15 +173,9 @@ function isAbortError(err: unknown, signal: AbortSignal | undefined): boolean {
   return false
 }
 
-/** Build the effective tool set for this loop, applying:
- *  1. The static tool registry (always)
- *  2. The task tool (when subAgentRegistry is present)
- *  3. options.toolFilter allow/deny (for sub-agent loops)
- *
- *  Computed once per session and cached — the tool set is stable within
- *  a session (registry doesn't change, filter doesn't change). */
+/** 构建当前循环真正可用的工具集合。 */
 function buildTools(options: AgentOptions) {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  // 这里复用现有工具注册表形状，暂时保留较宽松的工具类型。
   const tools: Record<string, any> = { ...toolRegistry }
 
   if (options.subAgentRegistry) {
@@ -243,13 +186,11 @@ function buildTools(options: AgentOptions) {
     tools.activateSkill = createActivateSkillTool(options.skillRegistry)
   }
 
-  // MCP tools: declared without `execute` so the AI SDK leaves them in
-  // `result.toolCalls` for processToolCalls to hand-dispatch through the
-  // permission / loop-guard / abortSignal pipeline.
+  // MCP 工具故意不带 `execute`，这样 AI SDK 会把它们保留在 `result.toolCalls`
+  // 中，后续统一走权限、loop-guard 与 abortSignal 流程。
   if (options.mcpRegistry) {
-    // Two universal MCP-aware built-ins. Only registered when MCP is
-    // active so a model without any MCP context doesn't see them and
-    // start hallucinating resource URIs.
+    // 这两个 MCP 内置工具只在 MCP 启用时注册，避免模型在无上下文时
+    // 幻觉出不存在的资源 URI。
     tools.listMcpResources = listMcpResources
     tools.readMcpResource = readMcpResource
     for (const entry of options.mcpRegistry.list()) {
@@ -275,7 +216,7 @@ function buildTools(options: AgentOptions) {
   return tools
 }
 
-/** Run one agent turn: stream to UI, collect response. Resilient to errors. */
+/** 执行单个 agent turn：串流到 UI、收集响应，并对错误保持韧性。 */
 async function runTurn(
   state: LoopState,
   model: LanguageModel,
@@ -284,32 +225,17 @@ async function runTurn(
   callbacks: AgentCallbacks,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   effectiveTools: Record<string, any>,
-  /** Current turn number — diagnostic only, threaded in so the debug log
-   *  can tag each finish with which iteration of the outer loop it was. */
+  /** 当前 turn 编号，仅用于调试日志标记。 */
   turn: number,
 ): Promise<TurnOutcome> {
-  // Defensive sweep BEFORE every API call: if the previous turn left
-  // an assistant tool_call without a paired tool_result anywhere in
-  // state.messages (model emitted malformed tool input → SDK rejected
-  // with tool-error and never produced a result; or a turn errored
-  // mid-flight), append a synthetic error result so the request body
-  // is well-formed. Providers strictly require tool_call ↔ tool_result
-  // pairing and reject the whole request with confusing errors like
-  // "tool must be a response to a preceding message with tool_calls".
-  // Idempotent — running every turn is cheap and bulletproof.
+  // 每次 API 调用前都做一次防御性清扫：如果历史中残留了孤立的 tool_call，
+  // 就补一条合成 tool_result，保证请求体结构始终合法。
   repairOrphanToolCalls(state.messages)
 
-  // Text-only providers (DeepSeek, custom) would 400 on any surviving
-  // image/file parts. Rewrite those parts to OCR'd text in-place before
-  // the stream starts. Multimodal providers short-circuit inside the
-  // helper based on their capability flags.
+  // 纯文本 provider 遇到 image/file part 会直接 400，因此发请求前要先降级成文本。
   await downgradeBinaryPartsForProvider(state.messages, options.modelId)
 
-  // Per-provider prompt caching: Anthropic gets cache_control breakpoints on
-  // the system prompt + last tool + last two messages (4 total, the API
-  // maximum); OpenAI gets a stable promptCacheKey keyed on sessionId;
-  // OpenAI-compatible providers rely on the system-prompt cache in LoopState
-  // keeping the prefix byte-stable.
+  // 不同 provider 的 prompt cache 机制不同，但目标都是尽量复用稳定前缀。
   const cached = applyCacheControl({
     system: systemPrompt,
     messages: state.messages,
@@ -318,15 +244,7 @@ async function runTurn(
     sessionId: state.sessionId,
   })
 
-  // Extended-thinking / reasoning toggle. The user-facing `/thinking on|off`
-  // command (App.tsx) flips `options.thinking`; we translate that flag into
-  // the provider-specific switch (Anthropic `thinking`, Google
-  // `thinkingConfig`, Alibaba `enableThinking`, etc.) and merge it into the
-  // existing per-call providerOptions. Models with no thinking concept
-  // (gpt-4.1, grok-3, glm-4-plus) get an empty entry — the SDK silently
-  // ignores the unrelated keys. Defaults to off when undefined so a stale
-  // config without the new field doesn't surprise users with a quality /
-  // latency change on launch.
+  // `/thinking on|off` 只是统一入口，真正下发时要翻译成各 provider 自己的选项格式。
   const thinkingOptions = getThinkingProviderOptions(options.modelId, options.thinking ?? false)
   const mergedProviderOptions = mergeThinkingOptions(cached.providerOptions, thinkingOptions)
 
@@ -339,23 +257,11 @@ async function runTurn(
       tools: cached.tools ?? effectiveTools,
       maxRetries: 3,
       abortSignal: options.abortSignal,
-      // Explicit ceiling so provider defaults don't silently truncate long
-      // replies. Most providers clamp a too-high value, but some reject it
-      // outright with HTTP 400. getMaxOutputTokens applies per-model ceilings;
-      // unknown models fall through to the module-level default.
+      // 显式设置输出上限，避免 provider 默认值静默截断长回答。
       maxOutputTokens: getMaxOutputTokens(options.modelId),
-      // AI SDK types `providerOptions` as `SharedV3ProviderOptions` (nested
-      // JSONObject). Our cache-control helper returns a looser
-      // `Record<string, unknown>` shape because provider-specific field sets
-      // drift too fast to keep a strict union in sync. The runtime contract
-      // is narrow JSON and we cast here at the single call site.
+      // providerOptions 在类型层较宽松，这里集中在唯一调用点完成转换。
       providerOptions: mergedProviderOptions as Parameters<typeof streamText>[0]['providerOptions'],
-      // Suppress the SDK's default onError, which is `console.error(error)`
-      // and dumps the full RetryError object (stack + nested APICallError
-      // array + provider response bodies) via util.inspect to stderr. We
-      // already classify and surface a one-line user-friendly message via
-      // classifyApiError + callbacks.onError in the try/catch blocks below.
-      // The raw dump scares users and isn't actionable. Keep a debug hatch.
+      // 覆盖 SDK 默认的 stderr 原始错误输出，避免把庞大 RetryError 直接甩给用户。
       onError: ({ error }) => {
         if (process.env.DEBUG_STDOUT) debugLog('stream.onError', String(error))
       },
@@ -366,20 +272,13 @@ async function runTurn(
     return { kind: 'error' }
   }
 
-  // Pre-attach .catch(noop) handlers to every sibling promise the SDK exposes
-  // (response/usage/finishReason/toolCalls) BEFORE we await the stream. On
-  // request failure the SDK rejects all of them in the same tick — if we wait
-  // for fullStream to throw and only then drain, Node's unhandled-rejection
-  // sweep can run first and terminate the process. Attaching catch handlers
-  // early is idempotent: a later `await result.response` still rejects and
-  // propagates normally through our error path.
+  // 在真正 await 这些兄弟 Promise 前先统一挂上 catch，避免 unhandled rejection。
   drainStreamResult(result)
 
   try {
     await streamChunksToUI(result, callbacks)
   } catch (err) {
-    // Silently drain all pending AI SDK promises so unhandled-rejection
-    // warnings (NoOutputGeneratedError) don't leak to stderr.
+    // 再次兜底清空未处理 Promise，防止 NoOutputGeneratedError 泄漏到 stderr。
     drainStreamResult(result)
 
     if (isAbortError(err, options.abortSignal)) return { kind: 'aborted' }
@@ -390,10 +289,7 @@ async function runTurn(
         cwd: process.cwd(),
         abortSignal: options.abortSignal,
       })
-      // Compression makes its own LLM round-trip (2–5s) and doesn't accept
-      // an abort signal. If the user Esc'd while it ran, the next runTurn
-      // would issue another streamText only to have the SDK reject it
-      // immediately on the now-aborted signal — wasted setup. Bail here.
+      // 压缩本身也需要一次 LLM 往返。如果用户在此期间已经取消，就直接结束。
       if (options.abortSignal?.aborted) return { kind: 'aborted' }
       if (compressed) return { kind: 'retry' }
     }
@@ -416,7 +312,7 @@ async function runTurn(
   }
 }
 
-/** Main agent loop. */
+/** 主 agent 循环。 */
 export async function agentLoop(
   userMessage: UserContent,
   model: LanguageModel,
@@ -426,24 +322,13 @@ export async function agentLoop(
 ): Promise<AgentLoopResult> {
   const state = existingState ?? createLoopState(options.permissionMode ?? 'default')
 
-  // ── Plugin hook: SessionStart ──
-  // First-invocation-of-the-session marker. Fire-and-forget, but awaited
-  // so hooks have a chance to inject session-scoped env / state before
-  // SessionStart used to fire here on the first agentLoop call. It now
-  // fires from the CLI startup path in packages/cli/src/index.ts so
-  // hooks can do session-level setup before the user interacts at all —
-  // a session that ends without any user message (e.g. user runs only
-  // slash commands, then exits) would otherwise silently skip the event.
-  // Sub-agent invocations always pass an existingState so they never
-  // triggered this branch anyway; library consumers calling agentLoop
-  // directly need to fire SessionStart themselves at session boundaries.
+  // ── 插件 Hook：SessionStart ──
+  // 这是“会话首次调用”标记。虽然整体是 fire-and-forget 思路，但这里仍会等待，
+  // 让 hook 有机会在真正开始处理用户输入前注入会话级环境或状态。
 
-  // ── Plugin hook: UserPromptSubmit ──
-  // Runs BEFORE the message is pushed into state.messages so a `deny`
-  // decision keeps the transcript clean (no stranded prompt). A
-  // `modify` with `context` prepends the injected text into the user
-  // message itself rather than as a second user message — back-to-back
-  // user messages confuse some providers' tool-call sequencing.
+  // ── 插件 Hook：UserPromptSubmit ──
+  // 该 hook 会在消息真正写入 state.messages 前运行；这样如果插件选择拒绝，
+  // 就不会在会话记录里留下“悬空”的用户提示词。
   let effectiveUserMessage = userMessage
   if (options.hookBus?.has('UserPromptSubmit')) {
     const promptText = userContentToText(userMessage)
@@ -454,12 +339,10 @@ export async function agentLoop(
       )
       const effect = aggregateUserPromptSubmit(decisions)
       if (effect.decision === 'deny') {
-        const reason = effect.reason ?? 'blocked by plugin hook'
-        const notice = `[Prompt blocked by plugin hook: ${reason}]`
+        const reason = effect.reason ?? '被插件 hook 拦截'
+        const notice = `[提示词已被插件 hook 拦截：${reason}]`
         callbacks.onTextDelta(notice)
-        // Push BOTH the user's original message and a synthetic assistant
-        // response — keeps state.messages valid as alternating user /
-        // assistant turns the next submit can build on.
+        // 同时推入原始用户消息和一条合成 assistant 响应，保持消息序列依旧合法。
         state.messages.push({ role: 'user', content: userMessage })
         state.messages.push({ role: 'assistant', content: notice })
         return { state, turnCount: 0 }
@@ -477,128 +360,67 @@ export async function agentLoop(
 
   state.messages.push({ role: 'user', content: effectiveUserMessage })
 
-  // ── Rewind checkpoint ──
-  // Snapshot the working tree for every file in `state.filesModified`
-  // and record the message-index anchor, so a later `/rewind` can roll
-  // both the file state and the conversation back to this point.
-  //
-  // Skipped for sub-agent invocations: those run with their own ephemeral
-  // LoopState that the user never sees in the picker — disk churn with
-  // no surfacing value. `subAgentRegistry` is set only on the main loop
-  // (cli/src/index.ts) and explicitly cleared by `runSubAgent`.
-  //
-  // Awaited so a quick follow-up tool can't race the snapshot read — the
-  // overhead is one mkdir + N small reads (typically <30ms even with a
-  // few dozen tracked files, since content-addressed dedup skips
-  // already-written blobs). createCheckpoint never throws and returns
-  // null on FS failure, in which case rewind to this point isn't
-  // available — UI degrades gracefully.
+  // ── Rewind 检查点 ──
+  // 这里会为当前已修改文件拍一个工作树快照，并记录当前消息索引锚点，
+  // 供后续 `/rewind` 同时回滚文件状态与对话状态。
   if (options.subAgentRegistry) {
     const promptPreview = userContentToText(effectiveUserMessage).slice(0, 200)
     const ckpt = await createCheckpoint(state, promptPreview)
     if (ckpt) void appendCheckpoint(state, ckpt)
   }
 
-  // Per-invocation turn counter. Scoped to this single `agentLoop` call
-  // — re-entering the function (next user submit) starts at 0 again.
-  // This is the structural fix for the "Reached maximum turns" bug
-  // that fired on later submits because the counter used to live on
-  // `state` and accumulate across the whole CLI session.
+  // 每次 agentLoop 调用都从 0 开始计 turn，避免跨提交累计导致错误触发 maxTurns。
   let turn = 0
 
-  // Derive the session task-slug ONCE per session, on the first turn.
-  // Drives session-usage filenames (`<slug>-<sessionId>.usage.json`)
-  // and (when in plan mode) plan-file names. Set-once: changing it
-  // mid-session would orphan the file the previous turn already wrote
-  // to.
-  //
-  // For non-ASCII first messages (CJK, emoji-only) `generateTaskSlug`
-  // makes one isolated generateText round-trip to summarize the task
-  // into 2-4 English words; for ASCII messages it short-circuits to a
-  // local slugify with no network. We kick it off in parallel with
-  // knowledge / git-stat below so the round-trip overlaps with disk
-  // work and doesn't add serial latency to the first turn. The
-  // resulting slug is awaited before any session-usage write or plan
-  // file is created (well before the first runTurn), so paths are
-  // never written with a stale empty slug.
+  // 每个会话只在第一轮推导一次 task slug，后续会话文件命名都会复用它。
   const taskText = userContentToText(userMessage)
-  // Strip <activated_skill> XML blocks so the session slug and firstPrompt
-  // reflect the user's real intent rather than injected skill content.
+  // 去掉 <activated_skill> 注入块，保证 slug 与首条提示词反映的是用户真实意图。
   const taskTextForMeta = taskText.replace(/<activated_skill\b[^>]*>[\s\S]*?<\/activated_skill>/gi, '').trim()
   const taskSlugPromise: Promise<string> = state.taskSlug
     ? Promise.resolve(state.taskSlug)
     : generateTaskSlug(taskTextForMeta || taskText, model, options.modelId, options.abortSignal)
 
-  // Session continuation is handled explicitly by the UI: if the user accepts
-  // the resume prompt, the pending work is embedded directly in their first
-  // user message. Auto-injecting it into every system prompt made the model
-  // treat trivial greetings as "continue exploring", so we no longer do that.
+  // 会话续跑逻辑由 UI 显式处理，不再把续跑上下文自动注入到每一轮 system prompt 中。
   const fullKnowledgeContext = await buildKnowledgeContext()
 
-  // Detect git repo once — cheap stat, avoids per-turn disk hit
+  // 只检测一次当前目录是否为 git 仓库，避免每轮都碰磁盘。
   const isGitRepo = await fs
     .stat(path.join(process.cwd(), '.git'))
     .then(() => true)
     .catch(() => false)
 
-  // Cache knowledge context and git status on state for sub-agent use
+  // 把知识上下文与 git 状态缓存到 state，供 sub-agent 复用。
   state.knowledgeContext = fullKnowledgeContext
   state.isGitRepo = isGitRepo
 
-  // Resolve the slug now — must be set before any persistUsageSnapshot
-  // (per-turn) or plan-file write below. `generateTaskSlug` returns ''
-  // on failure, in which case session/plan files fall back to the
-  // pure-timestamp naming we had before this helper existed.
+  // 这里立即等待 slug 结果，保证后续任何 usage 或 plan 文件写入都不会拿到空路径前缀。
   state.taskSlug = await taskSlugPromise
 
-  // Lazy plan-file path derivation. We derive ONCE per plan-mode
-  // session (the first turn that's in plan mode without a path
-  // already set) from the user's task text. Re-deriving on every
-  // plan-mode turn would overwrite the path the model has been
-  // editing, so the !currentPlanPath guard is critical. Pass the
-  // session-wide slug so non-ASCII task text still gets a readable
-  // filename instead of timestamp-only.
+  // 计划文件路径也采用惰性推导，只在进入计划模式且还没有路径时生成一次。
   if (state.permissionMode === 'plan' && !state.currentPlanPath) {
     state.currentPlanPath = makePlanFilePath(taskText, { slug: state.taskSlug })
   }
 
-  // Write the session header to its jsonl file (idempotent for resumes —
-  // the header line already exists in that case and we skip). Must come
-  // AFTER taskSlug resolution because the filename is `<slug>-<id>.jsonl`.
-  // Fire-and-forget — never blocks the loop on FS errors.
+  // 把会话头信息写入 jsonl；对 resume 来说这是幂等操作。
   void appendHeader(state, options.modelId, taskTextForMeta || taskText)
 
   const compressionThreshold = getCompressionThreshold(options.modelId)
 
-  // Build the effective tool set once per session — includes the task
-  // tool when a subAgentRegistry is available, and applies toolFilter
-  // for sub-agent loops. Stable for the session lifetime.
+  // 工具集合在整个会话内保持稳定，因此只需构建一次。
   const effectiveTools = buildTools(options)
 
-  // Auto-continuation on `length` finish. Reasoning models can exhaust the
-  // output token budget before the user-visible reply completes — the old
-  // behavior was to stop mid-sentence and surface an error, which looks
-  // broken to the user. Instead, we push a short "continue" nudge and loop,
-  // capped so a pathologically runaway reply still terminates eventually.
+  // 当 finishReason 为 `length` 时自动续写，避免模型在半句话时被截断。
   const MAX_CONTINUATIONS = 3
   let continuationAttempts = 0
-  // Tracks whether we exited the loop on a clean `stop` finish reason —
-  // the only case where the post-turn memory extractor should run.
+  // 只有在正常 `stop` 结束时，才允许运行会后记忆提取器。
   let completedNormally = false
 
-  // No `maxTurns` → run until the model says stop or the user aborts.
-  // This is the default for interactive mode (and Codex's main loop has
-  // no cap at all). `--print` and sub-agents pass a value.
+  // 若未设置 `maxTurns`，就一直运行到模型主动停止或用户中断为止。
   while (options.maxTurns === undefined || turn < options.maxTurns) {
     turn++
 
-    // Sweep any unpersisted messages from the prior iteration (or the
-    // initial user message on iter 1) into the jsonl. Diff-based: only
-    // appends `state.messages.slice(persistedMessageCount)`, so it's a
-    // no-op when nothing has changed. Must come BEFORE
-    // checkAndCompressContext — if compaction fires it rewrites the array
-    // in place and writes its own boundary + re-flush, which assumes the
-    // pre-compaction tail is already on disk.
+    // 先把上一轮尚未持久化的消息刷到 jsonl，再做压缩检查，避免压缩改写数组后
+    // 造成磁盘状态与内存状态错位。
     void flushPendingMessages(state)
 
     await checkAndCompressContext(state, model, compressionThreshold, callbacks, {
@@ -608,23 +430,9 @@ export async function agentLoop(
       abortSignal: options.abortSignal,
     })
 
-    // Build the system prompt once per session and reuse it across turns.
-    // Stable byte-level prefix is a prerequisite for OpenAI-compatible
-    // providers' automatic prefix caching (DeepSeek, Moonshot, Alibaba,
-    // Zhipu, xAI). If this string changes between turns — e.g. because
-    // buildSystemPrompt interpolates a fresh timestamp — the cache misses
-    // every request.
-    //
-    // The plan-mode overlay is folded into this same byte-stable cache.
-    // tool-execution invalidates the cache (sets it to null) when
-    // permissionMode flips, so each mode's prompt stays cache-friendly
-    // for as long as the mode is active. Only the boundary turn pays the
-    // cache miss.
+    // system prompt 在同一会话中尽量只构建一次，以保持前缀字节稳定并最大化缓存命中。
     if (!state.systemPromptCache) {
-      // Names actually going into the system prompt — used to verify that
-      // disabled skills are filtered out (registry.list() drops them) and
-      // that the names you see match the registry's enabled set. Fires
-      // once per session because the prompt is built once and cached.
+      // 记录最终进入 system prompt 的技能名，便于核对禁用技能是否真的被过滤掉。
       if (options.skillRegistry) {
         const enabled = options.skillRegistry.list().map((s) => s.name)
         const disabled = options.skillRegistry
@@ -639,11 +447,7 @@ export async function agentLoop(
         isGitRepo,
         planMode: state.permissionMode === 'plan',
         planFilePath: state.currentPlanPath ?? undefined,
-        // Pass MCP tools so the `## MCP Tools` section is appended.
-        // Empty / absent registry → buildSystemPrompt's placeholder
-        // resolves to "" and the prompt is byte-identical to the
-        // pre-MCP shape, preserving prefix-cache for sessions
-        // without MCP configured.
+        // 只有 MCP 启用时才向 system prompt 附加 MCP 工具说明。
         mcpTools: options.mcpRegistry ? toSystemPromptEntries(options.mcpRegistry.list()) : undefined,
         skills: options.skillRegistry ? options.skillRegistry.list() : undefined,
       })
@@ -652,11 +456,8 @@ export async function agentLoop(
 
     const outcome = await runTurn(state, model, options, systemPrompt, callbacks, effectiveTools, turn)
 
-    // ── Plugin hook: TurnComplete ──
-    // Fires regardless of finish reason (including error / abort) so
-    // notification / audit hooks see every turn, not just clean stops.
-    // Parallel + best-effort: hook failures and aborts can't block the
-    // outcome dispatch below.
+    // ── 插件 Hook：TurnComplete ──
+    // 无论正常结束、报错还是中断，都会尽力触发，让审计/通知类 hook 看见每一轮。
     if (options.hookBus?.has('TurnComplete')) {
       const event: HookEvent = {
         name: 'TurnComplete',
@@ -676,14 +477,13 @@ export async function agentLoop(
     if (outcome.kind === 'error') break
     if (outcome.kind === 'aborted') break
     if (outcome.kind === 'retry') {
-      // Don't count a failed attempt that got recovered via reactive compaction.
+      // 经由被动压缩恢复成功的尝试不计入 turn 次数。
       turn--
       continue
     }
 
     if (outcome.finishReason === 'tool-calls') {
-      // Any successful tool round means the model is making real progress —
-      // reset the consecutive-truncation counter.
+      // 只要工具轮次成功执行，就说明模型在推进任务，重置连续截断计数。
       continuationAttempts = 0
       let toolCalls: Awaited<StreamResult['toolCalls']>
       try {
@@ -694,8 +494,7 @@ export async function agentLoop(
         break
       }
       await processToolCalls(toolCalls, state, options, callbacks, model)
-      // processToolCalls short-circuits on abort with synthetic results;
-      // skip the next streamText call which would just throw AbortError.
+      // processToolCalls 在中断时会自行短路；这里直接跳过下一次 streamText。
       if (options.abortSignal?.aborted) break
       continue
     }
@@ -704,26 +503,22 @@ export async function agentLoop(
       if (continuationAttempts < MAX_CONTINUATIONS) {
         continuationAttempts++
         debugLog('turn.length-continuation', `attempt=${continuationAttempts}/${MAX_CONTINUATIONS} turn=${turn}`)
-        // Nudge the model to pick up exactly where it stopped. This goes
-        // into state.messages but NOT into UI messages, so the user sees
-        // one continuous streamed reply with at most a brief pause.
+        // 给模型一个“从断点继续”的提示，但不直接显示给用户。
         state.messages.push({
           role: 'user',
           content:
-            'Output token limit hit. Resume directly — no apology, no recap. Pick up mid-thought if that is where the cut happened. Break remaining work into smaller pieces.',
+            '输出 token 已达到上限。请直接续写，不要道歉，也不要复述总结。如果中断发生在一句话中间，就从中间继续，并把剩余工作拆成更小的部分。',
         })
         continue
       }
       callbacks.onError(
-        new Error(
-          `Response still truncated after ${MAX_CONTINUATIONS} continuation attempts — ask a narrower question.`,
-        ),
+        new Error(`连续续写 ${MAX_CONTINUATIONS} 次后响应仍被截断。请改问更聚焦的问题。`),
       )
       break
     }
 
     if (outcome.finishReason === 'content-filter') {
-      callbacks.onError(new Error('Response stopped by the provider content filter.'))
+      callbacks.onError(new Error('响应已被 provider 的内容过滤器中止。'))
     } else if (outcome.finishReason === 'stop') {
       completedNormally = true
     }
@@ -731,31 +526,17 @@ export async function agentLoop(
     break
   }
 
-  // Only report "max turns reached" when:
-  //   1. A cap was actually set (interactive mode has none — there's no
-  //      cap to "reach"), AND
-  //   2. We hit it, AND
-  //   3. The model didn't already finish cleanly on the same turn — the
-  //      `!completedNormally` guard handles the boundary where 'stop'
-  //      lands exactly on the maxTurns-th turn.
+  // 只有真的设置了 maxTurns，且确实撞到了上限，同时模型又没在这一轮正常结束时，
+  // 才报告“已达到最大轮数”。
   if (options.maxTurns !== undefined && turn >= options.maxTurns && !completedNormally) {
-    callbacks.onError(new Error(`Reached maximum turns (${options.maxTurns}). Stopping agent loop.`))
+    callbacks.onError(new Error(`已达到最大轮数限制（${options.maxTurns}），agent 循环停止。`))
   }
 
-  // Final flush — catches the last iteration's content when we exit via
-  // 'stop'/'error' (the next-iter flush at the top of the loop never
-  // runs in those cases). Abort path: useAgent.abort() pushes the
-  // `[Request interrupted by user]` notice AFTER agentLoop returns, so
-  // it's responsible for its own flush — see use-agent.ts.
+  // 最后再 flush 一次，兜住因为 stop / error 直接退出而没被下一轮顶部刷盘的消息。
   void flushPendingMessages(state)
 
-  // Post-turn memory extractor: runs ONLY on a clean `stop` finish (no
-  // error, no abort, no content-filter, no length-cap give-up). Fire-and-
-  // forget — the user can type the next prompt immediately while a single
-  // generateText + Output.object call scans the transcript for durable
-  // knowledge to persist. Writes go directly to AutoMemory (silent path)
-  // so the ChatInput frame doesn't render a tool row after the user's
-  // reply is already complete.
+  // 会后记忆提取器只在正常 stop 后运行，并采用 fire-and-forget 方式，
+  // 不阻塞用户继续输入。
   if (completedNormally && !options.abortSignal?.aborted) {
     void runMemoryExtractor({
       parentState: state,
@@ -768,15 +549,8 @@ export async function agentLoop(
   return { state, turnCount: turn }
 }
 
-/** Sync any in-memory messages to the session jsonl. Called on exit /
- *  cleanup paths so a process kill doesn't lose the last turn. Per-turn
- *  appends already happen during agentLoop — this is the safety-net
- *  drain for whatever is left. Tolerant of a half-initialized state
- *  (no taskSlug yet etc.); flushPendingMessages no-ops when there's
- *  nothing to write. The `model` parameter is kept for API stability
- *  with the previous summary-generating implementation but is unused
- *  here — summaries now ride along on `compact-boundary` lines, not
- *  on a separate exit-time call. */
+/** 把内存中的消息同步到会话 jsonl。
+ *  主要用于退出与清理路径，避免最后一轮内容丢失。 */
 export async function saveSession(state: LoopState, _model: LanguageModel): Promise<void> {
   await flushPendingMessages(state)
 }

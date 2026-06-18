@@ -1,4 +1,4 @@
-// Tests for agent loop (mock LLM responses)
+// agent loop 测试，使用模拟的 LLM 响应。
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { streamText } from 'ai'
@@ -6,7 +6,7 @@ import { streamText } from 'ai'
 import { agentLoop } from '../src/agent/loop.js'
 import type { AgentCallbacks, TokenUsage } from '../src/types/index.js'
 
-// Mock cheerio + turndown (pulled in via toolRegistry → webFetch)
+// 模拟 cheerio + turndown（通过 toolRegistry → webFetch 间接引入）。
 vi.mock('cheerio', () => ({
   load: vi.fn(() => {
     const $ = () => ({ remove: vi.fn(), first: vi.fn(() => ({ length: 0, html: () => '' })), html: () => '' })
@@ -22,7 +22,7 @@ vi.mock('turndown', () => ({
   },
 }))
 
-// Mock AI SDK
+// 模拟 AI SDK。
 vi.mock('ai', async () => {
   const actual = await vi.importActual('ai')
   return {
@@ -32,7 +32,7 @@ vi.mock('ai', async () => {
   }
 })
 
-// Mock knowledge modules to avoid filesystem side effects
+// 模拟 knowledge 模块，避免文件系统副作用。
 vi.mock('../src/knowledge/loader.js', () => ({
   buildKnowledgeContext: vi.fn().mockResolvedValue(''),
 }))
@@ -41,9 +41,8 @@ vi.mock('../src/knowledge/session.js', () => ({
   generateSessionSummary: vi.fn().mockResolvedValue({}),
 }))
 
-// Block jsonl persistence — keep tests free of fs side effects in the
-// project's `.x-code/sessions/` (which would leak between runs and pollute
-// developers' repos when they execute the suite locally).
+// 禁止 jsonl 持久化，确保测试不会在项目 `.x-code/sessions/` 下留下文件系统副作用，
+// 否则这些产物会在多次运行之间泄漏，并污染开发者本地仓库。
 vi.mock('../src/agent/session-store.js', () => ({
   appendHeader: vi.fn().mockResolvedValue(undefined),
   appendUsage: vi.fn().mockResolvedValue(undefined),
@@ -77,7 +76,7 @@ describe('agent loop', () => {
     }
   })
 
-  it('streams text from LLM and collects usage', async () => {
+  it('会流式接收 LLM 文本并汇总用量', async () => {
     const mockChunks = [
       { type: 'text-delta', text: 'Hello' },
       { type: 'text-delta', text: ' world' },
@@ -118,7 +117,7 @@ describe('agent loop', () => {
     expect(state.messages.length).toBeGreaterThan(0)
   })
 
-  it('stops at finishReason stop (single turn)', async () => {
+  it('finishReason 为 stop 时会结束（单轮）', async () => {
     vi.mocked(streamText).mockReturnValue({
       fullStream: {
         async *[Symbol.asyncIterator]() {
@@ -141,8 +140,8 @@ describe('agent loop', () => {
     expect(turnCount).toBe(1)
   })
 
-  it('reports error when max turns exceeded', async () => {
-    // Force tool-calls finish reason to keep looping
+  it('超过最大轮数时会上报错误', async () => {
+    // 强制返回 tool-calls，让循环持续进行。
     vi.mocked(streamText).mockReturnValue({
       fullStream: {
         async *[Symbol.asyncIterator]() {
@@ -167,11 +166,10 @@ describe('agent loop', () => {
     expect(errArg.message).toContain('maximum turns')
   })
 
-  it('turn counter resets between submits sharing the same LoopState', async () => {
-    // Regression: turnCount used to live on LoopState and accumulate across
-    // every user submit within the same CLI session — after ~100 cumulative
-    // turns every subsequent submit hit the cap immediately. Now it's a
-    // per-invocation local, so two clean turns in a row each report 1.
+  it('共享同一份 LoopState 的多次提交之间会重置轮数计数', async () => {
+    // 回归说明：turnCount 过去挂在 LoopState 上，会在同一个 CLI 会话里的多次用户提交之间持续累加。
+    // 当累计轮数接近 100 后，后续提交会立刻撞到上限。
+    // 现在它改成单次调用内的局部计数，因此连续两次独立提交都应该各自得到 1。
     vi.mocked(streamText).mockReturnValue({
       fullStream: {
         async *[Symbol.asyncIterator]() {
@@ -188,14 +186,14 @@ describe('agent loop', () => {
     const first = await agentLoop('msg 1', {} as any, opts, mockCallbacks)
     expect(first.turnCount).toBe(1)
 
-    // Re-enter with the same LoopState — simulates a second user submit.
+    // 用同一份 LoopState 再次进入，模拟第二次用户提交。
     const second = await agentLoop('msg 2', {} as any, opts, mockCallbacks, first.state)
     expect(second.turnCount).toBe(1)
   })
 
-  it('omitted maxTurns runs without a cap', async () => {
-    // The fix also makes maxTurns optional. When unset, the loop runs to
-    // a natural finish — no "Reached maximum turns" error.
+  it('省略 maxTurns 时会在无上限模式下自然结束', async () => {
+    // 这个修复也让 maxTurns 变成可选项。未设置时，循环应自然结束，
+    // 而不是抛出 “Reached maximum turns” 错误。
     vi.mocked(streamText).mockReturnValue({
       fullStream: {
         async *[Symbol.asyncIterator]() {

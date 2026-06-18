@@ -1,26 +1,22 @@
-// @x-code-cli/core — Hooks subsystem types
+// @x-code-cli/core — Hooks 子系统类型定义
 //
-// A hook is a shell command a plugin registers against one of six agent
-// lifecycle events. The CLI emits an event payload to the hook on stdin
-// as one JSON line; the hook may reply on stdout with a one-line JSON
-// `HookDecision` to influence what the agent does next (allow / deny /
-// modify args / inject context).
+// hook 本质上是插件注册到某个代理生命周期事件上的 shell 命令。CLI
+// 会把事件载荷作为一行 JSON 通过 stdin 发给 hook；hook 也可以在
+// stdout 回一行 JSON 的 `HookDecision`，以影响代理下一步行为
+// （allow / deny / modify args / 注入 context）。
 //
-// Why shell commands and not a programmatic SDK: lowest barrier to entry
-// for plugin authors, matches the format users already see in Claude
-// Code, and keeps the surface area small (no plugin code runs inside
-// our process). See [[plugin-marketplace-design]] §8 for the full
-// rationale.
+// 为什么选择 shell 命令而不是程序化 SDK：对插件作者来说门槛最低，
+// 形式上也与用户在 Claude Code 中已经熟悉的模式一致，同时还能把
+// 暴露面维持得很小（插件代码不会在我们的进程内执行）。完整理由可见
+// [[plugin-marketplace-design]] §8。
 //
-// Why ten events: enough to cover the high-value lifecycle integrations
-// (context injection, tool gating, sub-agent audit, compaction
-// instrumentation, completion notifications) without exposing every
-// internal seam we may want to refactor. Adding events later is cheap;
-// removing them is a breaking change. PreCompact / PostCompact and
-// SubagentStart / SubagentStop were added in round 2 to match the
-// Claude/Codex shape — plugins that want to log every sub-agent
-// invocation or persist state before compaction wipes it had no other
-// hook to attach to.
+// 为什么是十个事件：它已经足以覆盖高价值的生命周期集成点
+// （上下文注入、工具闸门、子代理审计、压缩过程埋点、完成通知），
+// 同时不会把所有将来可能重构的内部接缝都暴露出去。后续新增事件很便宜；
+// 删除事件则属于破坏性变更。PreCompact / PostCompact 与
+// SubagentStart / SubagentStop 是第二轮加入的，用来对齐 Claude/Codex
+// 的形状——想记录每次子代理调用、或想在压缩清理上下文前持久化状态的
+// 插件，在此之前没有可挂接的位置。
 
 export type HookEventName =
   | 'SessionStart'
@@ -34,64 +30,43 @@ export type HookEventName =
   | 'TurnComplete'
   | 'SessionEnd'
 
-/** Subset of events that emit a decision the agent acts on. Other events
- *  are fire-and-forget — hooks may run side effects (logging,
- *  notifications) but the agent ignores their stdout. */
+/** 会产出代理可执行决策的事件子集。其他事件都属于即发即弃：hook 可以执行副作用（日志、通知等），但代理会忽略它们的 stdout。 */
 export type DecisionEvent = 'UserPromptSubmit' | 'PreToolUse' | 'PostToolUse'
 
-/** One hook entry as it appears in hooks.json. */
+/** hooks.json 中的单个 hook 条目。 */
 export interface HookConfigEntry {
-  /** Optional regex matching tool name. Only meaningful for PreToolUse /
-   *  PostToolUse — ignored for other events. A missing matcher means
-   *  "every tool". */
+  /** 可选的工具名匹配正则。只对 PreToolUse / PostToolUse 有意义，其他事件会忽略它；缺失时表示“匹配所有工具”。 */
   matcher?: string
-  /** Shell command to run on the current platform when no platform-specific
-   *  override below is set. Supports `${pluginDir}` / `${pluginDataDir}` /
-   *  `${cwd}` / `${homedir}` / `${env:NAME}` / `${sep}` variable expansion
-   *  (see [[variables]]).
-   *
-   *  We require this even when the platform overrides are set so plugin
-   *  authors can't accidentally ship a plugin that runs on *only* one OS
-   *  — the base command is the safety net for any platform the author
-   *  didn't explicitly think about. */
+  /** 当前平台在未命中平台专属覆盖命令时要执行的 shell 命令。支持 `${pluginDir}` / `${pluginDataDir}` / `${cwd}` / `${homedir}` / `${env:NAME}` / `${sep}` 变量展开（见 [[variables]]）。即便设置了平台覆盖命令，这个字段也依然必填，用来避免插件作者不小心发布一个“只支持单一操作系统”的插件。 */
   command: string
-  /** Platform-specific override commands. When set, the matching one
-   *  replaces `command` on that OS. Keys match `process.platform`
-   *  values; unknown platforms (freebsd / sunos / aix) fall through to
-   *  the base `command`. */
+  /** Windows 平台专属覆盖命令；设置后会在 win32 上替代 `command`。 */
   commandWindows?: string
+  /** macOS 平台专属覆盖命令；设置后会在 darwin 上替代 `command`。 */
   commandDarwin?: string
+  /** Linux 平台专属覆盖命令；设置后会在 linux 上替代 `command`。 */
   commandLinux?: string
-  /** Per-hook timeout in ms (default 5000, capped at 30000). */
+  /** 单个 hook 的超时时间，单位毫秒（默认 5000，最大 30000）。 */
   timeout?: number
+  /** hook 的描述信息，供人类阅读。 */
   description?: string
-  /** What to do when the hook exits non-zero or crashes:
-   *
-   *    'allow'  (default) — log warning, treat as if the hook said allow
-   *    'block'            — treat as deny (only meaningful for DecisionEvents)
-   *
-   *  The default is permissive on purpose: a broken hook must not be
-   *  able to wedge the agent loop indefinitely. */
+  /** 当 hook 非零退出或崩溃时的处理策略：`allow`（默认）表示记录警告并当作允许；`block` 表示按拒绝处理（只对决策事件有意义）。默认选择宽松策略，是为了避免损坏的 hook 把 agent loop 永久卡住。 */
   failurePolicy?: 'allow' | 'block'
 }
 
-/** A whole hooks.json file. Each event name maps to an ordered array of
- *  entries — earlier entries run first, and for decision events a deny
- *  short-circuits the rest. */
+/** 完整的 hooks.json 结构。每个事件名都映射到一个有序条目数组，较早的条目先执行；对于决策事件，`deny` 会短路后续条目。 */
 export type HookConfig = Partial<Record<HookEventName, HookConfigEntry[]>>
 
-/** Session-level context attached to every event payload. */
+/** 附着在每个事件载荷上的会话级上下文。 */
 export interface SessionContext {
+  /** 当前工作目录。 */
   cwd: string
+  /** 当前使用的模型标识。 */
   modelId: string
-  /** Optional — when the CLI assigns a session id we pass it through so
-   *  hooks can correlate events. */
+  /** 可选的会话标识；当 CLI 分配了 session id 时会透传给 hook，方便它们关联多次事件。 */
   sessionId?: string
 }
 
-/** Discriminated union of every event payload shape. The `name` field
- *  doubles as the tag. The CLI builds these and hands them to
- *  [[HookBus.emit]] — the executor serialises them as JSON for stdin. */
+/** 所有事件载荷形状组成的可辨识联合。`name` 字段同时承担判别标签的作用。CLI 会构建这些对象并交给 [[HookBus.emit]]，executor 再把它们序列化成 JSON 写入 stdin。 */
 export type HookEvent =
   | { name: 'SessionStart'; session: SessionContext }
   | { name: 'UserPromptSubmit'; session: SessionContext; prompt: string }
@@ -108,33 +83,31 @@ export type HookEvent =
   | {
       name: 'PreCompact'
       session: SessionContext
-      /** Why compaction is about to run — useful for hooks that want to
-       *  decide whether to checkpoint state or skip. */
+      /** 即将执行压缩的原因，方便 hook 决定是否要先做状态检查点或直接跳过。 */
       trigger: 'proactive' | 'reactive'
-      /** Approximate message count and token count before compaction. */
+      /** 压缩前的大致消息数量。 */
       messageCount: number
+      /** 压缩前的大致 token 数量估算。 */
       tokenEstimate: number
     }
   | {
       name: 'PostCompact'
       session: SessionContext
       trigger: 'proactive' | 'reactive'
-      /** Message count after compaction — the delta from PreCompact's
-       *  messageCount tells the hook how much was reclaimed. */
+      /** 压缩后的消息数量；与 PreCompact 的 messageCount 做差后，可得出回收了多少上下文。 */
       messageCount: number
-      /** Empty string when the path was a light-compact (no LLM summary
-       *  was written). */
+      /** 如果走的是轻量压缩路径（没有写入 LLM 摘要），这里会是空字符串。 */
       summary: string
     }
   | {
       name: 'SubagentStart'
       session: SessionContext
       agent: {
-        /** The sub-agent's registered name (e.g. `code-reviewer`). */
+        /** 子代理的注册名称，例如 `code-reviewer`。 */
         name: string
-        /** The parent agent's one-line task description. */
+        /** 父代理提供的一行任务描述。 */
         description: string
-        /** The full prompt the parent agent sent to the sub-agent. */
+        /** 父代理发给子代理的完整 prompt。 */
         prompt: string
       }
     }
@@ -145,10 +118,9 @@ export type HookEvent =
         name: string
         description: string
       }
-      /** Wall-clock duration of the sub-agent run. */
+      /** 子代理运行的实际耗时（墙钟时间）。 */
       durationMs: number
-      /** How the sub-agent finished. `aborted` includes Esc cancellation
-       *  and reaching the per-agent maxTurns cap without finalising. */
+      /** 子代理的结束方式。`aborted` 同时包含按 Esc 取消，以及达到单代理 maxTurns 上限但未完成收尾的情况。 */
       outcome: 'completed' | 'aborted' | 'failed'
       tokenUsage?: { inputTokens: number; outputTokens: number; totalTokens: number }
     }
@@ -160,20 +132,20 @@ export type HookEvent =
     }
   | { name: 'SessionEnd'; session: SessionContext }
 
-/** What a hook can ask the agent to do via its stdout JSON. */
+/** hook 可以通过 stdout JSON 请求代理执行的动作。 */
 export type HookDecision =
   | { decision: 'allow'; context?: string }
   | { decision: 'deny'; reason?: string }
   | { decision: 'modify'; args?: unknown; output?: string; context?: string }
 
-/** A hook ready to execute — paired with its owning plugin's identity
- *  and rootDir so variable expansion can resolve `${pluginDir}`. Built
- *  by [[buildHookRegistry]] at startup, immutable for the session. */
+/** 已经准备好执行的 hook。它会与所属插件的身份信息和根目录配对，便于变量展开解析 `${pluginDir}`。对象由 [[buildHookRegistry]] 在启动时构建，并在整个会话中保持不变。 */
 export interface RegisteredHook {
+  /** 所属插件的唯一标识。 */
   pluginId: string
-  /** Absolute path to the plugin's root dir — substituted into the
-   *  hook command via `${pluginDir}`. */
+  /** 插件根目录的绝对路径，会通过 `${pluginDir}` 注入到 hook 命令中。 */
   pluginDir: string
+  /** 该 hook 绑定到的事件名。 */
   event: HookEventName
+  /** hook 的具体配置条目。 */
   entry: HookConfigEntry
 }

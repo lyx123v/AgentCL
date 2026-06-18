@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { LruCache } from '../src/utils/lru-cache.js'
 
 describe('LruCache', () => {
-  it('stores and retrieves values', () => {
+  it('可以存储并读取值', () => {
     const cache = new LruCache<number>({ maxEntries: 10 })
     cache.set('a', 1)
     cache.set('b', 2)
@@ -11,12 +11,12 @@ describe('LruCache', () => {
     expect(cache.get('b')).toBe(2)
   })
 
-  it('returns null for missing keys', () => {
+  it('缺失的 key 会返回 null', () => {
     const cache = new LruCache<string>({ maxEntries: 10 })
     expect(cache.get('missing')).toBeNull()
   })
 
-  it('evicts oldest entry when maxEntries is exceeded', () => {
+  it('超过 maxEntries 时会淘汰最旧条目', () => {
     const cache = new LruCache<number>({ maxEntries: 3 })
     cache.set('a', 1)
     cache.set('b', 2)
@@ -29,14 +29,14 @@ describe('LruCache', () => {
     expect(cache.size).toBe(3)
   })
 
-  it('promotes accessed entries (LRU order)', () => {
+  it('访问过的条目会提升优先级（LRU 顺序）', () => {
     const cache = new LruCache<number>({ maxEntries: 3 })
     cache.set('a', 1)
     cache.set('b', 2)
     cache.set('c', 3)
-    // Access 'a' — it becomes most-recently-used
+    // 访问 `a` 后，它会变成最近使用的条目。
     cache.get('a')
-    // Insert 'd' — 'b' is now the oldest and should be evicted
+    // 插入 `d` 后，`b` 会成为最旧条目并被淘汰。
     cache.set('d', 4)
     expect(cache.get('b')).toBeNull()
     expect(cache.get('a')).toBe(1)
@@ -44,7 +44,7 @@ describe('LruCache', () => {
     expect(cache.get('d')).toBe(4)
   })
 
-  describe('TTL expiry', () => {
+  describe('TTL 过期', () => {
     beforeEach(() => {
       vi.useFakeTimers()
     })
@@ -52,7 +52,7 @@ describe('LruCache', () => {
       vi.useRealTimers()
     })
 
-    it('returns null for expired entries', () => {
+    it('过期条目会返回 null', () => {
       const cache = new LruCache<string>({ maxEntries: 10, ttlMs: 1000 })
       cache.set('key', 'value')
       expect(cache.get('key')).toBe('value')
@@ -61,7 +61,7 @@ describe('LruCache', () => {
       expect(cache.get('key')).toBeNull()
     })
 
-    it('returns value before TTL expires', () => {
+    it('TTL 未到期前会正常返回值', () => {
       const cache = new LruCache<string>({ maxEntries: 10, ttlMs: 5000 })
       cache.set('key', 'value')
 

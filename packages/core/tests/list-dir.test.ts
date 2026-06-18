@@ -6,11 +6,12 @@ import path from 'node:path'
 
 import { listDir } from '../src/tools/list-dir.js'
 
+// 执行 listDir 工具，统一传入测试所需的最小上下文。
 const exec = (input: Record<string, unknown>) =>
   listDir.execute!(input as any, { toolCallId: 'test', messages: [], abortSignal: undefined as any })
 
 describe('listDir tool', () => {
-  it('lists files and directories', async () => {
+  it('可以列出文件和目录', async () => {
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'xc-ld-'))
     await fs.writeFile(path.join(tmpDir, 'file.ts'), 'content')
     await fs.mkdir(path.join(tmpDir, 'subdir'))
@@ -22,7 +23,7 @@ describe('listDir tool', () => {
     await fs.rm(tmpDir, { recursive: true })
   })
 
-  it('shows "/" suffix for directories only', async () => {
+  it('只会给目录追加 "/" 后缀', async () => {
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'xc-ld-'))
     await fs.writeFile(path.join(tmpDir, 'readme.md'), '')
     await fs.mkdir(path.join(tmpDir, 'src'))
@@ -37,7 +38,7 @@ describe('listDir tool', () => {
     await fs.rm(tmpDir, { recursive: true })
   })
 
-  it('returns "(empty directory)" for empty dirs', async () => {
+  it('空目录会返回 "(empty directory)"', async () => {
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'xc-ld-'))
 
     const result = (await exec({ dirPath: tmpDir })) as string
@@ -46,7 +47,7 @@ describe('listDir tool', () => {
     await fs.rm(tmpDir, { recursive: true })
   })
 
-  it('returns error for non-existent directory', async () => {
+  it('不存在的目录会返回错误', async () => {
     const result = (await exec({ dirPath: '/tmp/nonexistent-xc-dir-test' })) as string
     expect(result).toContain('Error')
   })

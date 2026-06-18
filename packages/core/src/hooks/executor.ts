@@ -1,20 +1,17 @@
-// @x-code-cli/core — Hook command executor
+// @x-code-cli/core — Hook 命令执行器
 //
-// Spawns a hook's shell command, writes the event JSON on stdin, reads
-// the decision JSON from stdout. The whole protocol is line-oriented:
-// one JSON object in, one JSON object out (or empty stdout = default
-// allow). Anything else on stdout is ignored — common pattern for hooks
-// that just want to log to stderr without influencing the agent.
+// 它会启动 hook 的 shell 命令，把事件 JSON 写入 stdin，再从 stdout
+// 读取决策 JSON。整个协议都是按行工作的：输入一个 JSON 对象，输出一个
+// JSON 对象（如果 stdout 为空，则默认 allow）。stdout 中的其他内容
+// 都会被忽略，这很适合那些只想往 stderr 打日志、不想影响代理流程的 hook。
 //
-// Failure handling is deliberately permissive (default `failurePolicy:
-// 'allow'`): a broken hook must never wedge the agent loop. Non-zero
-// exit, timeout, or crash all degrade to `allow` and log a debug
-// breadcrumb. The `block` policy is opt-in and reserved for hooks the
-// plugin author has explicitly designed as gating hooks.
+// 失败处理刻意设计得比较宽松（默认 `failurePolicy: 'allow'`）：
+// 一个损坏的 hook 绝不能把 agent loop 卡死。非零退出、超时或崩溃，
+// 都会降级为 `allow`，并留下一条调试日志。`block` 是显式选择的策略，
+// 只留给插件作者明确设计成“闸门型”的 hook 使用。
 //
-// AbortSignal propagation: passed to execa's `cancelSignal` so the
-// child process is SIGKILL'd when the user hits Esc mid-hook. Same
-// machinery the shell tool uses.
+// AbortSignal 会继续向下传递给 execa 的 `cancelSignal`，这样当用户在
+// hook 执行中按下 Esc 时，子进程会被 SIGKILL。shell 工具走的是同一套机制。
 import { execa } from 'execa'
 
 import { getPluginUserConfigEnv } from '../plugins/user-config.js'
@@ -22,11 +19,7 @@ import { debugLog } from '../utils.js'
 import type { HookConfigEntry, HookDecision, HookEvent, RegisteredHook } from './types.js'
 import { buildVariableContext, expandVariables } from './variables.js'
 
-/** Return the command appropriate for the current OS. Plugin authors
- *  set `command` as a portable default and may add `commandWindows` /
- *  `commandDarwin` / `commandLinux` to handle per-OS differences (e.g.
- *  shebang line, executable name, quoting). Unknown platforms (freebsd,
- *  sunos, aix) fall through to the base. */
+/** 根据当前操作系统选择要执行的命令。插件作者会把 `command` 作为可移植的默认值，并可通过 `commandWindows` / `commandDarwin` / `commandLinux` 处理各平台差异（例如 shebang、可执行文件名、引号规则）。未知平台（freebsd、sunos、aix）会回退到基础命令。 */
 function pickPlatformCommand(entry: HookConfigEntry): string {
   switch (process.platform) {
     case 'win32':
@@ -44,19 +37,13 @@ const DEFAULT_TIMEOUT_MS = 5_000
 const MAX_TIMEOUT_MS = 30_000
 
 export interface ExecuteHookOptions {
-  /** Cancels the hook child process when fired. Agent loop's abort
-   *  signal flows through here so Esc during a slow hook kills it
-   *  promptly. */
+  /** 触发后会取消 hook 子进程。agent loop 的 abort signal 会沿着这里传下来，因此慢 hook 运行时按 Esc 可以及时终止它。 */
   signal?: AbortSignal
-  /** Override the default 5s timeout. Per-hook `entry.timeout` still
-   *  wins when both are set. Both are capped at 30s. */
+  /** 覆盖默认的 5 秒超时。若同时设置了每个 hook 自己的 `entry.timeout`，则后者优先；两者都会被限制在 30 秒内。 */
   defaultTimeoutMs?: number
 }
 
-/** Run one hook against one event. Returns the parsed decision (default
- *  allow on anything unexpected). Never throws unless the caller's
- *  AbortSignal fires — abort is the one error worth bubbling because
- *  the caller's loop is already shutting down. */
+/** 执行一个 hook 与一个事件的组合。返回解析后的决策结果（任何意外情况都会默认 allow）。除非调用方的 AbortSignal 触发，否则这里不会抛错；因为 abort 是唯一值得向上传播的异常，此时调用方的循环本身已经在收尾。 */
 export async function executeHook(
   hook: RegisteredHook,
   event: HookEvent,
@@ -72,11 +59,11 @@ export async function executeHook(
   const expandedCommand = expandVariables(pickPlatformCommand(hook.entry), vars)
   const stdinPayload = JSON.stringify(buildStdinPayload(hook, event))
 
-  // Merge the owning plugin's userConfig values into the hook's env.
-  // Hook scripts that need an API key declared in the manifest read it as
-  // `process.env[KEY]` without writing any glue — `${env:KEY}` substitution
-  // in the command string also resolves against this merged env. We fail
-  // silent if the read errors (no userConfig set yet ⇒ empty map).
+  // 把所属插件的 userConfig 合并进 hook 的环境变量。
+  // 这样一来，hook 脚本如果需要读取 manifest 中声明的 API key，
+  // 直接通过 `process.env[KEY]` 即可，不需要额外胶水代码；
+  // 命令字符串里的 `${env:KEY}` 替换也会基于这份合并后的 env。
+  // 如果读取失败，我们会静默处理（例如还没设置 userConfig，此时就当空映射）。
   let pluginEnv: Record<string, string> = {}
   try {
     pluginEnv = await getPluginUserConfigEnv(hook.pluginId)
@@ -91,40 +78,39 @@ export async function executeHook(
       timeout: timeoutMs,
       cancelSignal: opts.signal,
       stdio: 'pipe',
-      reject: false, // Non-zero exits handled below explicitly, not as throws.
+      reject: false, // 非零退出会在下方显式处理，而不是以抛错形式处理。
       cwd: event.session.cwd,
       env: { ...process.env, ...pluginEnv },
     })
 
     if (opts.signal?.aborted) {
-      // Aborted mid-execution. Caller's loop is winding down — surface
-      // by throwing so the bus stops cascading further hooks.
+      // 执行中途被中止。调用方的循环已经开始收尾，因此这里通过抛错
+      // 向上传递，让 bus 停止继续级联后续 hook。
       throw new Error('aborted')
     }
 
     if (result.timedOut) {
       debugLog('hooks.exec-timeout', `${hook.pluginId} ${event.name}: timed out after ${timeoutMs}ms`)
-      return failurePolicyDecision(hook, `hook timed out after ${timeoutMs}ms`)
+      return failurePolicyDecision(hook, `hook 执行超时：${timeoutMs}ms`)
     }
     if (typeof result.exitCode === 'number' && result.exitCode !== 0) {
       const stderrTail = (result.stderr ?? '').toString().slice(0, 200)
       debugLog('hooks.exec-nonzero', `${hook.pluginId} ${event.name}: exit ${result.exitCode} stderr=${stderrTail}`)
-      return failurePolicyDecision(hook, `hook exited ${result.exitCode}`)
+      return failurePolicyDecision(hook, `hook 非零退出：${result.exitCode}`)
     }
 
     const decision = parseDecision(result.stdout ?? '', hook, event)
-    // Trace successful hook runs so plugin authors can confirm their
-    // hook actually fired without needing to add their own logging.
-    // Stdio is `pipe`d (we read the JSON decision out of stdout), so
-    // anything the hook writes to its own stderr is otherwise invisible
-    // — this breadcrumb is what `--plugin-debug` / `DEBUG_STDOUT=1`
-    // users grep for to verify the wiring.
+    // 记录成功执行的 hook，方便插件作者确认 hook 确实被触发，
+    // 而不必自己额外加日志。由于 stdio 被设成 `pipe`（我们要从 stdout
+    // 读取 JSON 决策），hook 自己写到 stderr 的内容默认并不会直接可见；
+    // 因此这条 breadcrumb 就是 `--plugin-debug` / `DEBUG_STDOUT=1`
+    // 用户用来确认链路是否接通的关键线索。
     debugLog('hooks.exec-ran', `${hook.pluginId} ${event.name}: decision=${decision.decision}`)
     return decision
   } catch (err) {
     if (opts.signal?.aborted) throw err
     debugLog('hooks.exec-error', `${hook.pluginId} ${event.name}: ${String(err)}`)
-    return failurePolicyDecision(hook, `hook crashed: ${err instanceof Error ? err.message : String(err)}`)
+    return failurePolicyDecision(hook, `hook 执行崩溃：${err instanceof Error ? err.message : String(err)}`)
   }
 }
 
@@ -133,9 +119,7 @@ function failurePolicyDecision(hook: RegisteredHook, reason: string): HookDecisi
   return { decision: 'allow' }
 }
 
-/** Build the JSON object sent to the hook over stdin. Event-specific
- *  fields are flattened in at the top level (matches Claude Code's
- *  hook protocol shape). */
+/** 构建通过 stdin 发送给 hook 的 JSON 对象。事件专属字段会被拍平到顶层，这与 Claude Code 的 hook 协议形状保持一致。 */
 function buildStdinPayload(hook: RegisteredHook, event: HookEvent): Record<string, unknown> {
   const base: Record<string, unknown> = {
     event: event.name,
@@ -175,7 +159,7 @@ function buildStdinPayload(hook: RegisteredHook, event: HookEvent): Record<strin
       base.turn = event.turn
       if (event.tokenUsage) base.tokenUsage = event.tokenUsage
       break
-    // SessionStart / SessionEnd have no extra fields beyond session/plugin.
+    // SessionStart / SessionEnd 除了 session/plugin 之外没有额外字段。
   }
   return base
 }
@@ -194,9 +178,8 @@ function parseDecision(stdout: string, hook: RegisteredHook, event: HookEvent): 
       }
     }
   } catch {
-    // Not JSON — many hooks intend stdout for human eyes (logs). Treat
-    // as default allow but breadcrumb in case the user expected it to
-    // influence the agent.
+    // 不是 JSON。很多 hook 会把 stdout 当成人看的日志输出。
+    // 这里按默认 allow 处理，但会留下一条 breadcrumb，以防用户原本希望它能影响代理行为。
     debugLog(
       'hooks.decision-not-json',
       `${hook.pluginId} ${event.name}: ignoring non-JSON stdout: ${trimmed.slice(0, 200)}`,

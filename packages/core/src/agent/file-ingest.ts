@@ -1,16 +1,16 @@
-// @x-code-cli/core — Attach-file-to-message pipeline
+// @x-code-cli/core — 文件附加到消息的处理流水线
 //
-// Given a raw user prompt that references files (via `@path` or bare
-// absolute paths), resolve each reference into an AI-SDK content part:
+// 当原始用户输入中通过 `@path` 或裸绝对路径引用文件时，
+// 这里会把每个引用解析成 AI SDK 可接受的 content part：
 //
-//   text / code  → TextPart with file body
-//   PDF          → TextPart with extracted text (local, no tokens wasted on binary)
-//   docx/xlsx/pptx → TextPart via officeparser/mammoth/xlsx
-//   image        → ImagePart for multimodal providers; OCR'd TextPart for DeepSeek
+//   文本 / 代码   → 带文件正文的 TextPart
+//   PDF          → 带提取文本的 TextPart（本地提取，不浪费二进制 token）
+//   docx/xlsx/pptx → 通过 officeparser / mammoth / xlsx 转成 TextPart
+//   图片         → 多模态 provider 走 ImagePart；DeepSeek 等走 OCR 后的 TextPart
 //
-// PDF is deliberately NOT sent as a FilePart even to multimodal providers
-// when we can extract text locally — a 100-page text PDF becomes a few KB
-// of prompt instead of tens of thousands of tokens of rendered pages.
+// 对 PDF，这里特意优先走本地文本提取，而不是直接作为 FilePart 发送；
+// 这样一份 100 页的文本型 PDF 只会变成几 KB 的提示词，而不是成千上万
+// 个由页面渲染产生的 token。
 import fs from 'node:fs/promises'
 import path from 'node:path'
 
@@ -21,35 +21,31 @@ import { USER_XCODE_DIR } from '../utils.js'
 import { mediaTypeFor } from '../utils/media-type.js'
 import { captionImage, pickVisionProvider } from './vision-fallback.js'
 
-/** Where tesseract.js caches its language model weights (`eng.traineddata`,
- *  `chi_sim.traineddata`, ~7.6 MB total). Without this the worker writes
- *  them into process.cwd() — which means each project the user runs `xc` in
- *  re-downloads the same files, and untracked binaries leak into git status.
- *  Centralizing under `~/.x-code/tessdata/` makes the download a one-time
- *  cost shared across every project on the machine. */
+/** tesseract.js 缓存语言模型权重的目录。
+ *  不显式指定时，worker 会把文件写到 process.cwd()，导致每个项目都重复下载，
+ *  还会把二进制文件污染到 git status 中。统一放到 `~/.x-code/tessdata/`
+ *  后，只需下载一次，整台机器上的所有项目共享。 */
 async function tesseractCacheDir(): Promise<string> {
   const dir = path.join(USER_XCODE_DIR, 'tessdata')
   await fs.mkdir(dir, { recursive: true })
   return dir
 }
 
-/** A content part resolved from a file reference. Same types the AI SDK
- *  accepts in user message `content` arrays, so callers can splice these
- *  directly into a UserModelMessage. */
+/** 文件引用被解析后的内容片段类型。
+ *  与 AI SDK 在用户消息 `content` 数组中接受的类型保持一致。 */
 export type IngestedPart = TextPart | ImagePart | FilePart
 
 export type FileKind = 'text' | 'image' | 'pdf' | 'office' | 'unknown'
 
-/** Paths the user pointed at, either via `@file` or a bare absolute path. */
+/** 用户在输入中指向的文件，可以来自 `@file` 或裸绝对路径。 */
 export interface FileReference {
-  /** Original token from the user's input (for echoing/UI). */
+  /** 用户原始输入中的引用文本，用于回显或 UI 展示。 */
   raw: string
-  /** Resolved absolute path. */
+  /** 解析后的绝对路径。 */
   absolutePath: string
 }
 
-/** Extensions we treat as inline text without inspection. Order doesn't
- *  matter; this is just a membership check. */
+/** 直接视为可内联文本的扩展名集合，仅做成员判断，顺序无意义。 */
 const TEXT_EXTENSIONS = new Set([
   '.txt',
   '.md',
@@ -117,47 +113,29 @@ const TEXT_EXTENSIONS = new Set([
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp'])
 const OFFICE_EXTENSIONS = new Set(['.docx', '.xlsx', '.pptx', '.odt', '.ods', '.odp'])
 
-/** Max bytes a single inlined file can contribute to a user message before
- *  we replace its content with a help message. Picked at 256 KB to mirror
- *  Claude Code's Read-tool default — large enough for typical configs and
- *  source files, small enough that even a multi-file paste can't blow past
- *  a 1M context window.
- *
- *  Without this cap, `@really-large-file.txt` (or a bare absolute path like
- *  `D:\novels\book.txt`) silently shoves the entire file into the user
- *  message, since `buildUserContent` bypasses the readFile tool's per-call
- *  line guard. The model never gets a chance to react — the request just
- *  fails at the API with `context_length_exceeded`. With the cap, the model
- *  sees a short hint instead and can call readFile with offset/limit or
- *  grep to narrow down. */
+/** 单个内联文件允许贡献给用户消息的最大字节数。
+ *  超过后不再直接塞入正文，而是替换成一段提示信息。 */
 export const MAX_INGEST_BYTES = 256 * 1024
 
+/** 把字节数格式化成更易读的字符串。 */
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`
 }
 
-/** The human/model-facing message we substitute when an attachment is too
- *  large to inline. Mirrors Claude Code's `MaxFileReadTokenExceededError`
- *  message but adds the sub-agent escape hatch — for "summarize this whole
- *  novel" / "review this entire log" requests, chunk-by-chunk readFile
- *  iteration burns the parent context fast (each tool_result sticks around).
- *  Delegating to a sub-agent keeps only the summary in the parent. */
+/** 当附件过大无法内联时，替换给人和模型看的提示文案。
+ *  这里额外提示可用 sub-agent，以免整文件分析任务把父上下文迅速撑爆。 */
 function tooLargeMessage(filePath: string, sizeBytes: number): string {
   return (
-    `[File ${filePath} is too large to inline (${formatBytes(sizeBytes)}, ` +
-    `cap ${formatBytes(MAX_INGEST_BYTES)}). ` +
-    `Use the readFile tool with offset/limit to read specific portions, ` +
-    `or grep to search for specific content. ` +
-    `For whole-file analysis (summarization, full review), prefer delegating to ` +
-    `a sub-agent via the task tool — each sub-agent reads in isolated context ` +
-    `and returns only its conclusions, keeping the parent context lean.]`
+    `[文件 ${filePath} 过大，无法直接内联（当前 ${formatBytes(sizeBytes)}，上限 ${formatBytes(MAX_INGEST_BYTES)}）。` +
+    `请使用 readFile 工具配合 offset/limit 读取局部内容，或使用 grep 搜索特定片段。` +
+    `如果要做整文件分析（如总结、完整审查），更建议通过 task 工具委托给 sub-agent；` +
+    `它会在隔离上下文中读取文件，只把结论返回给父上下文，从而保持主会话精简。]`
   )
 }
 
-/** Classify a file by extension first, falling back to magic-byte detection
- *  when the extension is missing or unrecognized. */
+/** 优先按扩展名识别文件类型；如果扩展名缺失或未知，再回退到魔数检测。 */
 export async function classifyFile(filePath: string): Promise<FileKind> {
   const ext = path.extname(filePath).toLowerCase()
   if (TEXT_EXTENSIONS.has(ext)) return 'text'
@@ -165,11 +143,11 @@ export async function classifyFile(filePath: string): Promise<FileKind> {
   if (OFFICE_EXTENSIONS.has(ext)) return 'office'
   if (ext === '.pdf') return 'pdf'
 
-  // Unknown extension — peek magic bytes.
+  // 扩展名未知时，读取文件头做魔数检测。
   try {
     const { fileTypeFromFile } = await import('file-type')
     const detected = await fileTypeFromFile(filePath)
-    if (!detected) return 'text' // Empty signature → assume plain text.
+    if (!detected) return 'text' // 没有检测到签名时，保守按纯文本处理。
     if (detected.mime.startsWith('image/')) return 'image'
     if (detected.mime === 'application/pdf') return 'pdf'
     if (detected.mime.includes('officedocument') || detected.mime.includes('opendocument')) return 'office'
@@ -181,26 +159,14 @@ export async function classifyFile(filePath: string): Promise<FileKind> {
 }
 
 /**
- * Extract plain-text references from a user prompt. Two syntaxes are
- * recognized:
- *
- *   1. `@path` — the `@` prefix marks an explicit attachment. Stops at
- *      whitespace. Honors Windows (`D:\foo\bar`) and POSIX (`/etc/foo`)
- *      absolute paths.
- *
- *   2. Bare absolute paths — any token that looks like `C:\…`, `D:\…`, or
- *      starts with `/` and contains at least one path separator, with an
- *      extension. Less aggressive than @-mention: only fires on tokens that
- *      clearly look like paths, to avoid hijacking regex/SQL/etc.
- *
- * Duplicates are de-duplicated by absolute path so a file referenced twice
- * only gets ingested once.
+ * 从用户输入中提取文件引用。
+ * 支持两种形式：`@path` 与裸绝对路径，并按绝对路径去重。
  */
 export function extractFileReferences(input: string): FileReference[] {
   const refs = new Map<string, FileReference>()
 
-  // @path — one token, stops at whitespace. `@` must be at line start or
-  // preceded by whitespace so we don't eat `@user@host` email-ish tokens.
+  // @path：一个 token，到空白结束。`@` 必须在行首或空白后，
+  // 避免把 `@user@host` 这类邮箱样式文本误识别进去。
   const atRegex = /(?:^|\s)@((?:[A-Za-z]:[\\/]|[\\/])[^\s]+|[^\s@][^\s]*)/g
   for (const m of input.matchAll(atRegex)) {
     const raw = m[1] ?? ''
@@ -209,8 +175,8 @@ export function extractFileReferences(input: string): FileReference[] {
     refs.set(abs, { raw: `@${raw}`, absolutePath: abs })
   }
 
-  // Bare absolute paths. Require a separator + extension so code snippets
-  // like `fs.readFile` don't match. Windows drive letters + POSIX roots only.
+  // 裸绝对路径：要求包含路径分隔符和扩展名，避免把 `fs.readFile`
+  // 这类代码片段误判为路径。
   const bareRegex = /(?:^|\s)((?:[A-Za-z]:[\\/]|\/)[^\s]*\.[A-Za-z0-9]{1,8})/g
   for (const m of input.matchAll(bareRegex)) {
     const raw = m[1] ?? ''
@@ -222,18 +188,16 @@ export function extractFileReferences(input: string): FileReference[] {
   return [...refs.values()]
 }
 
-/** Read a file as a numbered text block — the same format the read-file
- *  tool produces, so the model sees a consistent representation whether
- *  the file was inlined up-front or fetched on demand. */
+/** 以带行号的文本块形式读取文件。
+ *  这样无论文件是预先内联，还是后续通过 readFile 获取，模型看到的格式都一致。 */
 async function readTextFile(filePath: string): Promise<string> {
   const content = await fs.readFile(filePath, 'utf-8')
   const lines = content.split('\n')
   return lines.map((line, i) => `${i + 1}\t${line}`).join('\n')
 }
 
-/** Extract plain text from a PDF. Uses pdf-parse's class-based v2 API
- *  (PDFParse.getText). Returns an empty string on failure; the caller
- *  decides whether to fall back to OCR. */
+/** 从 PDF 中提取纯文本。
+ *  使用 pdf-parse v2 的类式 API；失败时返回空字符串，由调用方决定是否回退到 OCR。 */
 async function extractPdfText(filePath: string): Promise<string> {
   try {
     const { PDFParse } = await import('pdf-parse')
@@ -250,9 +214,8 @@ async function extractPdfText(filePath: string): Promise<string> {
   }
 }
 
-/** Extract text from an Office document. Routes .docx through mammoth
- *  (best-in-class semantic extraction), .xlsx through SheetJS (CSV per
- *  sheet), everything else through officeparser. */
+/** 从 Office 文档中提取文本。
+ *  `.docx` 走 mammoth，`.xlsx` 走 SheetJS，其余常见 Office 格式走 officeparser。 */
 async function extractOfficeText(filePath: string): Promise<string> {
   const ext = path.extname(filePath).toLowerCase()
   try {
@@ -268,24 +231,22 @@ async function extractOfficeText(filePath: string): Promise<string> {
       for (const sheetName of wb.SheetNames) {
         const sheet = wb.Sheets[sheetName]
         if (!sheet) continue
-        parts.push(`--- Sheet: ${sheetName} ---\n${XLSX.utils.sheet_to_csv(sheet)}`)
+        parts.push(`--- 工作表：${sheetName} ---\n${XLSX.utils.sheet_to_csv(sheet)}`)
       }
       return parts.join('\n\n')
     }
-    // .pptx, .odt, .ods, .odp — officeparser handles these.
+    // `.pptx`、`.odt`、`.ods`、`.odp` 等格式统一交给 officeparser。
     const { OfficeParser } = await import('officeparser')
     const ast = await OfficeParser.parseOffice(filePath)
     return ast.toText()
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
-    return `[Failed to extract text from ${path.basename(filePath)}: ${msg}]`
+    return `[无法从 ${path.basename(filePath)} 中提取文本：${msg}]`
   }
 }
 
-/** OCR an image via tesseract.js. Loads Chinese + English language packs on
- *  first call (cached in-memory afterwards). Accuracy is limited, especially
- *  for handwriting or stylized text — intended as a text-extraction fallback
- *  for providers that can't natively see images. */
+/** 使用 tesseract.js 对图片做 OCR。
+ *  首次调用会加载中英文语言包，适合作为不支持视觉输入的 provider 的降级方案。 */
 export async function ocrImage(filePath: string): Promise<string> {
   try {
     const { createWorker } = await import('tesseract.js')
@@ -300,14 +261,12 @@ export async function ocrImage(filePath: string): Promise<string> {
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
-    return `[OCR failed: ${msg}]`
+    return `[OCR 失败：${msg}]`
   }
 }
 
-/** OCR every page of a PDF by rasterizing first. Used for scanned PDFs when
- *  pdf-parse's text extraction returns little/no text. Rasterization uses
- *  pdf-parse's own getScreenshot (pdfjs under the hood), so we don't need
- *  a separate pdf-to-img dependency. */
+/** 先把 PDF 光栅化，再对每一页做 OCR。
+ *  适用于扫描版 PDF，即 pdf-parse 几乎提取不到文本的场景。 */
 async function ocrPdf(filePath: string): Promise<string> {
   try {
     const { PDFParse } = await import('pdf-parse')
@@ -329,7 +288,7 @@ async function ocrPdf(filePath: string): Promise<string> {
       for (const page of screenshots.pages) {
         if (!page.data) continue
         const { data } = await worker.recognize(Buffer.from(page.data))
-        out.push(`--- Page ${page.pageNumber} ---\n${data.text ?? ''}`)
+        out.push(`--- 第 ${page.pageNumber} 页 ---\n${data.text ?? ''}`)
       }
       return out.join('\n\n')
     } finally {
@@ -337,23 +296,12 @@ async function ocrPdf(filePath: string): Promise<string> {
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
-    return `[PDF OCR failed: ${msg}]`
+    return `[PDF OCR 失败：${msg}]`
   }
 }
 
 /**
- * Resolve a single file reference into one or more content parts, taking
- * the active provider's multi-modal capabilities into account.
- *
- * Contract:
- *  - Text, Office, and text-bearing PDFs always collapse to a single
- *    TextPart — cheapest path, works for every provider.
- *  - Images: ImagePart if the provider can see images; otherwise OCR'd
- *    TextPart annotated as a fallback.
- *  - Scanned PDFs (pdf-parse yields near-empty text): FilePart for providers
- *    with PDF support; OCR'd TextPart otherwise.
- *  - Missing/unreadable files return a TextPart carrying the error so the
- *    model can acknowledge the failure rather than silently ignore it.
+ * 把单个文件引用解析成一个或多个 content part，并结合当前 provider 的多模态能力决定最终形式。
  */
 export async function ingestFile(
   ref: FileReference,
@@ -367,14 +315,12 @@ export async function ingestFile(
     kind = await classifyFile(ref.absolutePath)
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
-    return [{ type: 'text', text: `[Cannot read ${ref.raw}: ${msg}]` }]
+    return [{ type: 'text', text: `[无法读取 ${ref.raw}：${msg}]` }]
   }
 
   if (kind === 'text' || kind === 'unknown') {
-    // For text files, on-disk byte size is a tight upper bound on the
-    // inlined text size (numbered-line wrapper adds <1% overhead). Check
-    // before reading so we don't pull a multi-MB file into memory just to
-    // discard it.
+    // 对文本文件来说，磁盘字节数基本就是内联文本体积的上界，
+    // 因此先检查大小，避免把超大文件读入内存后又丢掉。
     if (stats.size > MAX_INGEST_BYTES) {
       return [{ type: 'text', text: tooLargeMessage(ref.absolutePath, stats.size) }]
     }
@@ -383,15 +329,13 @@ export async function ingestFile(
       return [{ type: 'text', text: `<<file path="${ref.absolutePath}">>\n${body}\n<</file>>` }]
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
-      return [{ type: 'text', text: `[Failed to read ${ref.raw}: ${msg}]` }]
+      return [{ type: 'text', text: `[读取 ${ref.raw} 失败：${msg}]` }]
     }
   }
 
   if (kind === 'office') {
     const text = await extractOfficeText(ref.absolutePath)
-    // Office binaries are usually much larger than their extracted text
-    // (compression + media), so check post-extraction. A book-length .docx
-    // can still exceed the cap.
+    // Office 二进制通常比提取后的纯文本大很多，因此要在提取后再检查一次大小。
     const textBytes = Buffer.byteLength(text, 'utf-8')
     if (textBytes > MAX_INGEST_BYTES) {
       return [{ type: 'text', text: tooLargeMessage(ref.absolutePath, textBytes) }]
@@ -401,8 +345,8 @@ export async function ingestFile(
 
   if (kind === 'pdf') {
     const extracted = await extractPdfText(ref.absolutePath)
-    // Heuristic: a "real" text PDF yields at least a couple hundred chars.
-    // Scanned PDFs typically yield empty strings or a few stray ligatures.
+    // 经验规则：真正的文本型 PDF 至少能提取出几百个字符；
+    // 扫描件通常只有空串或零碎乱码。
     if (extracted.trim().length > 200) {
       const textBytes = Buffer.byteLength(extracted, 'utf-8')
       if (textBytes > MAX_INGEST_BYTES) {
@@ -410,17 +354,17 @@ export async function ingestFile(
       }
       return [{ type: 'text', text: `<<file path="${ref.absolutePath}" kind="pdf-text">>\n${extracted}\n<</file>>` }]
     }
-    // Scanned / image-based PDF.
+    // 扫描版 / 图片型 PDF。
     if (caps.pdf) {
       try {
         const buffer = await fs.readFile(ref.absolutePath)
         return [{ type: 'file', data: buffer, mediaType: 'application/pdf', filename: path.basename(ref.absolutePath) }]
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
-        return [{ type: 'text', text: `[Failed to attach PDF ${ref.raw}: ${msg}]` }]
+        return [{ type: 'text', text: `[附加 PDF ${ref.raw} 失败：${msg}]` }]
       }
     }
-    // DeepSeek + scanned PDF: OCR locally.
+    // 当前模型不支持 PDF 输入时，对扫描版 PDF 在本地做 OCR。
     const ocr = await ocrPdf(ref.absolutePath)
     const ocrBytes = Buffer.byteLength(ocr, 'utf-8')
     if (ocrBytes > MAX_INGEST_BYTES) {
@@ -429,12 +373,12 @@ export async function ingestFile(
     return [
       {
         type: 'text',
-        text: `<<file path="${ref.absolutePath}" kind="pdf-ocr">>\n${ocr}\n<</file>>\n[Note: this PDF was OCR'd locally because the current model does not support PDF input; accuracy is limited.]`,
+        text: `<<file path="${ref.absolutePath}" kind="pdf-ocr">>\n${ocr}\n<</file>>\n[说明：当前模型不支持 PDF 输入，因此该 PDF 已在本地做 OCR；识别准确率有限。]`,
       },
     ]
   }
 
-  // Image.
+  // 图片。
   if (caps.image) {
     try {
       const buffer = await fs.readFile(ref.absolutePath)
@@ -444,49 +388,44 @@ export async function ingestFile(
       ]
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
-      return [{ type: 'text', text: `[Failed to attach image ${ref.raw}: ${msg}]` }]
+      return [{ type: 'text', text: `[附加图片 ${ref.raw} 失败：${msg}]` }]
     }
   }
 
-  // Text-only provider (DeepSeek, custom). Prefer a vision sub-agent if any
-  // other multimodal provider has a key configured — caption captures both
-  // text and visual content, OCR only catches text. Falls through to OCR
-  // when no sub-agent is available, or when the sub-agent call fails.
+  // 纯文本 provider（如 DeepSeek、自定义 provider）优先尝试视觉 sub-agent。
+  // caption 同时覆盖文字与视觉内容，而 OCR 只能提取文字。
   const sub = pickVisionProvider()
   if (sub) {
     try {
       const caption = await captionImage(ref.absolutePath, sub)
-      onNotice?.(`Captioned image via ${sub.modelId}`)
+      onNotice?.(`已通过 ${sub.modelId} 为图片生成描述`)
       return [
         {
           type: 'text',
-          text: `<<file path="${ref.absolutePath}" kind="image-caption" via="${sub.modelId}">>\n${caption}\n<</file>>\n[Note: the current model cannot see images. The above description was generated by ${sub.label} (vision sub-agent), not the current model. For complex visual tasks, /model switch to a vision-capable model and ask follow-ups directly.]`,
+          text: `<<file path="${ref.absolutePath}" kind="image-caption" via="${sub.modelId}">>\n${caption}\n<</file>>\n[说明：当前模型无法直接看图。上面的描述由 ${sub.label}（视觉 sub-agent）生成，而不是当前模型本身。若任务依赖复杂视觉理解，建议先用 /model 切换到支持视觉的模型后再继续追问。]`,
         },
       ]
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
-      onNotice?.(`Vision sub-agent (${sub.label}) failed: ${msg} — falling back to OCR`)
-      // fall through to OCR
+      onNotice?.(`视觉 sub-agent（${sub.label}）失败：${msg}，将回退到 OCR`)
+      // 失败后继续回退到 OCR。
     }
   }
 
-  // DeepSeek + image, no sub-agent (or sub-agent failed): OCR. Warn the model
-  // that this is not true image understanding so it doesn't confidently
-  // describe colors/layout/etc.
+  // 没有可用视觉 sub-agent，或调用失败时，对图片执行 OCR。
+  // 同时明确提示模型：这不是真正的图像理解，避免它误判颜色、布局等视觉信息。
   const ocr = await ocrImage(ref.absolutePath)
   return [
     {
       type: 'text',
-      text: `<<file path="${ref.absolutePath}" kind="image-ocr">>\n${ocr}\n<</file>>\n[Note: the current model cannot natively see images. Only OCR text is available; visual content (layout, diagrams, photos) is NOT visible.]`,
+      text: `<<file path="${ref.absolutePath}" kind="image-ocr">>\n${ocr}\n<</file>>\n[说明：当前模型不支持原生看图。这里只提供 OCR 文本，布局、图表、照片等视觉内容不可见。]`,
     },
   ]
 }
 
 /**
- * Compose the content parts for a user message: original text first, then
- * one or more parts per ingested file. Returns a plain string when no
- * files were referenced, so simple prompts stay on the string fast path
- * (keeps existing provider behavior / caching semantics unchanged).
+ * 组装用户消息的 content parts：先放原始文本，再依次追加每个文件解析出的内容片段。
+ * 如果没有文件引用，则直接返回原始字符串，保持简单提示词走原有快速路径。
  */
 export async function buildUserContent(
   text: string,

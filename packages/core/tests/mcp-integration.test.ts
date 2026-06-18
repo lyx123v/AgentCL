@@ -1,12 +1,11 @@
-// Integration test for the MCP stack — wires McpClient up to a real
-// child process implementing a minimal stdio MCP server, then exercises
-// connect → listTools → callTool → readResource → close end-to-end.
+// MCP 整体链路的集成测试。
+// 这里会把 McpClient 连接到一个真实子进程，该子进程实现了最小可用的 stdio MCP 服务器，
+// 然后端到端覆盖 connect → listTools → callTool → readResource → close。
 //
-// Why a custom mock and not `@modelcontextprotocol/server-filesystem`:
-//   - the official server pulls in a few hundred KB of deps via npx
-//     install on first run; flaky in CI without a warm cache
-//   - we want deterministic tool/resource shapes for assertions
-//   - fits in 100 lines, lives next to the test that uses it
+// 为什么用自定义 mock，而不是 `@modelcontextprotocol/server-filesystem`：
+//   - 官方服务器首次运行会通过 npx 安装数百 KB 依赖，在 CI 冷缓存下容易不稳定
+//   - 我们希望断言使用完全可预测的 tool/resource 结构
+//   - 整个 mock 只有约 100 行，且与测试文件放在一起，便于维护
 import { describe, expect, it } from 'vitest'
 
 import path from 'node:path'
@@ -22,7 +21,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const MOCK_SERVER = path.join(__dirname, 'fixtures', 'mock-mcp-server.mjs')
 
 describe('MCP integration (stdio)', () => {
-  it('connect → list tools → call tool → close', async () => {
+  it('可以完成 connect → list tools → call tool → close', async () => {
     const client = new McpClient('mock', {
       command: process.execPath,
       args: [MOCK_SERVER],
@@ -44,7 +43,7 @@ describe('MCP integration (stdio)', () => {
     }
   }, 15_000)
 
-  it('reads resources end-to-end', async () => {
+  it('可以端到端读取资源', async () => {
     const client = new McpClient('mock', { command: process.execPath, args: [MOCK_SERVER] })
     try {
       await client.connect()
@@ -60,7 +59,7 @@ describe('MCP integration (stdio)', () => {
     }
   }, 15_000)
 
-  it('surfaces server-reported errors via isError', async () => {
+  it('会通过 isError 暴露服务器上报的错误', async () => {
     const client = new McpClient('mock', { command: process.execPath, args: [MOCK_SERVER] })
     try {
       await client.connect()
@@ -71,11 +70,11 @@ describe('MCP integration (stdio)', () => {
     }
   }, 15_000)
 
-  it('restartServer reconnects a stdio server in place', async () => {
-    // Bootstrap a real registry via the loader so configs + oauthFactory
-    // wiring is exercised end-to-end. The loader spawns the mock server,
-    // enumerates `echo` + `add`, and returns a registry whose configs
-    // map remembers the launch config — restartServer() reads from there.
+  it('restartServer 会在原地重连 stdio 服务器', async () => {
+    // 通过 loader 启动一个真实 registry，这样配置加载和 oauthFactory 的接线
+    // 都能被端到端覆盖。loader 会启动 mock server，枚举出 `echo` 和 `add`，
+    // 然后返回 registry；其中 configs map 会记住启动配置，restartServer()
+    // 正是从这里读取配置重新拉起服务器。
     const { registry } = await loadMcpServers({
       userServers: {
         mock: { command: process.execPath, args: [MOCK_SERVER] },
@@ -94,16 +93,15 @@ describe('MCP integration (stdio)', () => {
       const restarted = await registry.restartServer('mock')
       expect(restarted.status.kind).toBe('connected')
 
-      // Tool list should be the same after a reconnect against the same
-      // server — we're verifying the registry rebuilt cleanly, not that
-      // the server changed its surface.
+      // 对同一台服务器重连后，工具列表应保持一致。
+      // 这里验证的是 registry 是否被干净重建，而不是服务器表面是否发生变化。
       const after = registry
         .list()
         .map((t) => t.callableName)
         .sort()
       expect(after).toEqual(before)
 
-      // Verify the new client (not the old, now-closed one) handles calls.
+      // 验证新的 client（而不是已经关闭的旧 client）能够正常处理调用。
       const r = await registry.callTool('mock__echo', { text: 'after-restart' })
       expect(r.text).toBe('after-restart')
     } finally {
@@ -111,12 +109,12 @@ describe('MCP integration (stdio)', () => {
     }
   }, 20_000)
 
-  it('restartAll diffs added / removed / changed servers', async () => {
-    // Boot with one server, then restartAll with a different config set:
-    //   - 'mock' stays (with the same config)        → unchanged
-    //   - 'mock-b' is new                            → added
-    //   - 'mock-old' would've been there but isn't   → (n/a — wasn't booted)
-    // Then a second restartAll removes 'mock-b' to exercise the removed path.
+  it('restartAll 会正确区分新增、删除和变更的服务器', async () => {
+    // 先用一台服务器启动，再用不同配置集合执行 restartAll：
+    //   - `mock` 保持不变（配置相同）           → unchanged
+    //   - `mock-b` 是新增项                    → added
+    //   - `mock-old` 本来可能存在但未启动      → 不适用
+    // 然后第二次 restartAll 再移除 `mock-b`，覆盖 removed 路径。
     const { registry } = await loadMcpServers({
       userServers: {
         mock: { command: process.execPath, args: [MOCK_SERVER] },
@@ -126,7 +124,7 @@ describe('MCP integration (stdio)', () => {
       askUser: async () => 'skip',
     })
     try {
-      // restartAll with `mock` unchanged + new `mock-b`
+      // 使用“`mock` 不变 + 新增 `mock-b`”的配置执行 restartAll。
       const configs1 = new Map<string, McpServerConfig>([
         ['mock', { command: process.execPath, args: [MOCK_SERVER] }],
         ['mock-b', { command: process.execPath, args: [MOCK_SERVER] }],
@@ -136,7 +134,7 @@ describe('MCP integration (stdio)', () => {
       expect(summary1.removed).toEqual([])
       expect(summary1.unchanged).toEqual(['mock'])
 
-      // Now both connected — tool list spans both servers.
+      // 此时两台服务器都已连接，工具列表应覆盖两者。
       const names = registry
         .list()
         .map((t) => t.callableName)
@@ -144,7 +142,7 @@ describe('MCP integration (stdio)', () => {
       expect(names).toContain('mock__echo')
       expect(names).toContain('mock_b__echo')
 
-      // Second restartAll: remove mock-b, change mock's args slightly.
+      // 第二次 restartAll：移除 mock-b，并轻微调整 mock 的参数。
       const configs2 = new Map<string, McpServerConfig>([
         ['mock', { command: process.execPath, args: [MOCK_SERVER], timeout: 15_000 }],
       ])
@@ -153,7 +151,7 @@ describe('MCP integration (stdio)', () => {
       expect(summary2.removed).toEqual(['mock-b'])
       expect(summary2.changed).toEqual(['mock'])
 
-      // mock-b should no longer appear in the tool surface.
+      // mock-b 不应再出现在工具列表中。
       const afterRemoval = registry
         .list()
         .map((t) => t.callableName)
@@ -165,7 +163,7 @@ describe('MCP integration (stdio)', () => {
     }
   }, 30_000)
 
-  it('authenticateServer rejects stdio servers', async () => {
+  it('authenticateServer 会拒绝 stdio 服务器', async () => {
     const { registry } = await loadMcpServers({
       userServers: {
         mock: { command: process.execPath, args: [MOCK_SERVER] },
@@ -181,7 +179,7 @@ describe('MCP integration (stdio)', () => {
     }
   }, 15_000)
 
-  it('registry dispatches by callable name', async () => {
+  it('registry 会按 callable name 分发调用', async () => {
     const client = new McpClient('mock', { command: process.execPath, args: [MOCK_SERVER] })
     try {
       await client.connect()
@@ -201,7 +199,7 @@ describe('MCP integration (stdio)', () => {
         resources: [],
       })
 
-      // Verify dispatch goes through the registry's callTool wrapper.
+      // 验证调用分发确实经过 registry 的 callTool 包装层。
       const callable = tools.find((t) => t.rawName === 'echo')!.callableName
       const result = await registry.callTool(callable, { text: 'via registry' })
       expect(result.text).toBe('via registry')
