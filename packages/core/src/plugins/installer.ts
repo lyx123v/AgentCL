@@ -44,52 +44,25 @@ import type {
 import { type UserConfigValue, setPluginUserConfig } from './user-config.js'
 
 export interface InstallRequest {
-  /** 插件来源定义。 */
-  source: PluginSource
-  /** 插件所属 marketplace。
-   *  如果是未关联已订阅 marketplace 的直接 git/local 安装，请使用 `"local"`，
-   *  这样最终插件 id 会变成 `<name>@local`。 */
-  marketplace: string
-  /** 记录安装结果的作用域，也决定哪个 settings.json 的 `enabledPlugins`
-   *  会提到它。默认值为 `'user'`。 */
-  scope?: PluginScope
-  /** 期望的插件名。
-   *  如果设置了它，而 manifest 中的 `name` 不匹配，则安装器会中止。
-   *  主要用于 marketplace 安装路径，防止条目被伪装。 */
-  expectedName?: string
-  /** marketplace 条目是否标记为 verified。
-   *  该信息会透传给 consent 回调，让用户知道该条目是否经过维护者背书。
-   *  它只是元数据，不会自动带来额外信任。 */
-  verified?: boolean
-  /** manifest 解析完成后、临时目录写入缓存前调用的同意回调。
-   *  返回 false 会中止安装，临时目录会被清理，缓存保持不变。
-   *  如果不传，则表示无需提示直接安装，常见于测试与 `--yes`。 */
-  consent?: (preview: ConsentPreview) => Promise<boolean> | boolean
-  /** 当 manifest 声明了 `userConfig` 且用户已通过同意检查后调用的配置收集回调。
-   *  调用方（CLI / TUI）负责逐项向用户收集值，通常会对 `sensitive: true`
-   *  的字段隐藏输入，最终返回 `{ key: value }` 形式的映射，并通过
-   *  user-config.ts 持久化。
-   *  返回 `null` 表示中止安装，效果等同于用户拒绝。
-   *  如果不传，则跳过该提示；非敏感字段回退到 manifest 默认值，
-   *  敏感字段保持未设置，此时插件 hooks / MCP 看到的就是空 env。 */
-  userConfigPrompt?: (fields: PluginManifest['userConfig']) => Promise<Record<string, UserConfigValue> | null>
-  /** 安装流程使用的取消信号。 */
-  signal?: AbortSignal
+  source: PluginSource // 插件来源定义
+  marketplace: string // 插件所属 marketplace；未关联已订阅 marketplace 的直接安装通常使用 `"local"`
+  scope?: PluginScope // 记录安装结果的作用域，也决定哪个 settings.json 的 `enabledPlugins` 会提到它
+  expectedName?: string // 期望的插件名；用于 marketplace 安装路径防止条目被伪装
+  verified?: boolean // marketplace 条目是否标记为 verified
+  consent?: (preview: ConsentPreview) => Promise<boolean> | boolean // manifest 解析后、写入缓存前调用的同意回调
+  userConfigPrompt?: (fields: PluginManifest['userConfig']) => Promise<Record<string, UserConfigValue> | null> // userConfig 收集回调，返回 `null` 表示中止安装
+  signal?: AbortSignal // 安装流程使用的取消信号
 }
 
 export interface InstallResult {
-  /** 最终安装得到的插件 id。 */
-  pluginId: string
-  /** 插件安装后的根目录。 */
-  rootDir: string
-  /** 已解析完成的插件 manifest。 */
-  manifest: PluginManifest
-  /** manifest 文件所属格式。 */
-  manifestFormat: ManifestFormat
-  /** 写入安装记录后的完整记录对象。 */
-  record: InstalledPluginRecord
+  pluginId: string // 最终安装得到的插件 id
+  rootDir: string // 插件安装后的根目录
+  manifest: PluginManifest // 已解析完成的插件 manifest
+  manifestFormat: ManifestFormat // manifest 文件所属格式
+  record: InstalledPluginRecord // 写入安装记录后的完整记录对象
 }
 
+/** 表示插件安装流程中的可预期失败。 */
 export class InstallError extends Error {
   constructor(message: string) {
     super(message)
@@ -97,6 +70,9 @@ export class InstallError extends Error {
   }
 }
 
+/** 按请求描述完成一次插件安装。
+ *  流程会依次执行来源拉取、manifest 解析、策略校验、用户同意、
+ *  userConfig 收集、缓存写入与安装记录持久化。 */
 export async function installPlugin(req: InstallRequest): Promise<InstallResult> {
   // ── 起飞前策略检查（成本低，尽早失败） ──
   // `strictKnownMarketplaces` 和 `blockedPlugins` 来自
@@ -457,10 +433,8 @@ export async function findInstalledPlugin(id: string): Promise<InstalledPluginRe
 // ── 卸载 ───────────────────────────────────────────────────────────────
 
 export interface UninstallResult {
-  /** 从缓存中删除掉的版本号列表；若插件原本就未缓存，则为空。 */
-  removedVersions: string[]
-  /** 是否成功移除了 installed_plugins.json 中的记录。 */
-  removedRecord: boolean
+  removedVersions: string[] // 从缓存中删除掉的版本号列表；若插件原本就未缓存，则为空
+  removedRecord: boolean // 是否成功移除了 installed_plugins.json 中的记录
 }
 
 /** 删除某个插件在缓存中的所有版本，并移除其 installed_plugins.json 记录。

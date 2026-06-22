@@ -16,6 +16,7 @@ import path from 'node:path'
 
 import { debugLog, userXcodeDir } from '../utils.js'
 
+/** 返回 MCP 权限持久化文件路径。 */
 function permissionsFile(): string {
   return path.join(userXcodeDir(), 'mcp-permissions.json')
 }

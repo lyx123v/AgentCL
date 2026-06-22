@@ -34,8 +34,7 @@ const SCOPE_PRECEDENCE: ReadonlyArray<PluginScope> = ['project', 'user']
 const DEFAULT_ENABLED = true
 
 interface PluginSettingsFile {
-  /** 各插件在当前 settings 文件中的启用状态映射。 */
-  enabledPlugins?: Record<string, boolean>
+  enabledPlugins?: Record<string, boolean> // 各插件在当前 settings 文件中的启用状态映射
 }
 
 /** 根据作用域计算对应的设置文件路径。 */

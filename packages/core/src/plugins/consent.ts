@@ -30,43 +30,23 @@ import { extractMcpServersBlock } from './integration.js'
 import type { PluginManifest, PluginSource } from './types.js'
 
 export interface ConsentPreview {
-  /** 插件完整 id，格式通常为 `name@marketplace`。 */
-  pluginId: string
-  /** 插件版本号。 */
-  version: string
-  /** 插件描述。 */
-  description?: string
-  /** 插件安装来源。 */
-  source: PluginSource
-  /** 插件所属 marketplace 名称。 */
-  marketplace: string
-  /** 是否来自被标记为 `verified` 的 marketplace 条目。 */
-  verified: boolean
-  /** marketplace 名称是否属于 `RESERVED_MARKETPLACE_NAMES` 保留名单。 */
-  fromReservedMarketplace: boolean
-  /** 插件注册的 hook 事件名列表；为空表示没有 hooks。 */
-  hookEvents: HookEventName[]
-  /** 以内联形式贡献的 MCP 服务名称。
-   *  路径形式不会在这里展开预览，因为那需要在用户同意前额外读取文件。 */
-  inlineMcpServerNames: string[]
-  /** 是否存在 skills 目录贡献。 */
-  hasSkillsDir: boolean
-  /** 是否存在 agents 目录贡献。 */
-  hasAgentsDir: boolean
-  /** 是否存在 commands 目录贡献。 */
-  hasCommandsDir: boolean
-  /** manifest 是否以文件路径方式声明了 `mcpServers`。
-   *  这种情况下同意阶段还拿不到具体名称，但仍然可以提醒用户该插件确实会
-   *  提供 MCP 服务。 */
-  hasPathMcpServers: boolean
-  /** hooks 是否也是以路径形式声明，而不是内联对象。 */
-  hasPathHooks: boolean
-  /** 作者名称。 */
-  author?: string
-  /** 许可证名称。 */
-  license?: string
-  /** 项目主页地址。 */
-  homepage?: string
+  pluginId: string // 插件完整 id，格式通常为 `name@marketplace`
+  version: string // 插件版本号
+  description?: string // 插件描述
+  source: PluginSource // 插件安装来源
+  marketplace: string // 插件所属 marketplace 名称
+  verified: boolean // 是否来自被标记为 `verified` 的 marketplace 条目
+  fromReservedMarketplace: boolean // marketplace 名称是否属于 `RESERVED_MARKETPLACE_NAMES` 保留名单
+  hookEvents: HookEventName[] // 插件注册的 hook 事件名列表；为空表示没有 hooks
+  inlineMcpServerNames: string[] // 以内联形式贡献的 MCP 服务名称；路径形式不会在这里展开预览
+  hasSkillsDir: boolean // 是否存在 skills 目录贡献
+  hasAgentsDir: boolean // 是否存在 agents 目录贡献
+  hasCommandsDir: boolean // 是否存在 commands 目录贡献
+  hasPathMcpServers: boolean // manifest 是否以文件路径方式声明了 `mcpServers`
+  hasPathHooks: boolean // hooks 是否也是以路径形式声明，而不是内联对象
+  author?: string // 作者名称
+  license?: string // 许可证名称
+  homepage?: string // 项目主页地址
 }
 
 /** 插件根目录在文件系统层面的探测结果。
@@ -75,44 +55,23 @@ export interface ConsentPreview {
  *  就能反映那些自动发现的贡献（例如 Claude Code 常见的约定：
  *  直接在 plugin.json 旁边放一个 `.mcp.json`，而不是写进 manifest）。 */
 export interface RootProbe {
-  /** 是否存在 skills 目录。 */
-  hasSkillsDir: boolean
-  /** 是否存在 agents 目录。 */
-  hasAgentsDir: boolean
-  /** 是否存在 commands 目录。 */
-  hasCommandsDir: boolean
-  /** 从根目录 `.mcp.json` / `mcp.json` 中解析出来的服务名列表。
-   *  支持扁平结构和带包装层的结构，具体规则见 [[extractMcpServersBlock]]。
-   *  如果两个文件都不存在，或者解析失败，则为空数组。 */
-  rootMcpServerNames: string[]
-  /** 根目录下是否存在 mcp 配置文件。
-   *  即便解析不出服务名，只要文件存在，同意界面也能继续提示
-   *  “这个插件会贡献 MCP 服务”。 */
-  hasRootMcpFile: boolean
-  /** 若根目录存在 `hooks/hooks.json`，这里记录解析出的 hook 事件名。 */
-  rootHookEvents: HookEventName[]
-  /** `hooks/hooks.json` 是否存在，不受解析是否成功影响。 */
-  hasRootHooksFile: boolean
+  hasSkillsDir: boolean // 是否存在 skills 目录
+  hasAgentsDir: boolean // 是否存在 agents 目录
+  hasCommandsDir: boolean // 是否存在 commands 目录
+  rootMcpServerNames: string[] // 从根目录 `.mcp.json` / `mcp.json` 中解析出的服务名列表
+  hasRootMcpFile: boolean // 根目录下是否存在 mcp 配置文件
+  rootHookEvents: HookEventName[] // 若根目录存在 `hooks/hooks.json`，这里记录解析出的 hook 事件名
+  hasRootHooksFile: boolean // `hooks/hooks.json` 是否存在，不受解析是否成功影响
 }
 
 export interface BuildPreviewInput {
-  /** 插件完整 id。 */
-  pluginId: string
-  /** 已解析完成的插件 manifest。 */
-  manifest: PluginManifest
-  /** 插件来源。 */
-  source: PluginSource
-  /** marketplace 名称。 */
-  marketplace: string
-  /** marketplace 条目是否标记为 verified。 */
-  verified?: boolean
-  /** 是否来自保留 marketplace 名称。 */
-  fromReservedMarketplace?: boolean
-  /** 可选的插件根目录探测结果。
-   *  没有它时，同意界面只能展示 manifest 明面上声明的内容，这会漏掉
-   *  那些沿用 Claude Code 目录约定、把贡献内容直接放在 `plugin.json`
-   *  旁边的插件。 */
-  rootProbe?: RootProbe
+  pluginId: string // 插件完整 id
+  manifest: PluginManifest // 已解析完成的插件 manifest
+  source: PluginSource // 插件来源
+  marketplace: string // marketplace 名称
+  verified?: boolean // marketplace 条目是否标记为 verified
+  fromReservedMarketplace?: boolean // 是否来自保留 marketplace 名称
+  rootProbe?: RootProbe // 可选的插件根目录探测结果
 }
 
 /** 探测插件根目录里那些遵循约定的贡献文件和目录。

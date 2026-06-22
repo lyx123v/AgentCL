@@ -37,6 +37,10 @@ import {
  *  （例如没有配置 token 存储），HTTP 服务这里也会返回 `undefined`。 */
 export type OAuthProviderFactory = (serverName: string, serverUrl: string) => OAuthClientProvider | undefined
 
+export interface AuthBrowserOpenInfo {
+  url: string // SDK 准备跳转到的授权地址
+}
+
 export interface RegisteredServer {
   name: string // 服务名
   client: McpClient // 对应的 MCP 客户端实例
@@ -48,20 +52,15 @@ export interface RegisteredServer {
 
 /** `/mcp auth` 处理器传入的钩子，用于在不依赖 CLI UI 层的前提下对外汇报进度。 */
 export interface AuthHooks {
-  /** 即将打开浏览器前调用一次，参数是 SDK 准备跳转到的授权地址。 */
-  onBrowserOpen?: (url: string) => void // 浏览器打开前的通知回调
+  onBrowserOpen?: (url: string) => void // 即将打开浏览器前触发，参数是 SDK 准备跳转到的授权地址
 }
 
 /** `restartAll` 实际变更内容的摘要，供 `/mcp refresh` 输出使用。 */
 export interface RestartSummary {
-  /** 重启后新增、重启前不存在的服务名。 */
-  added: string[] // 新增服务
-  /** 被移除的服务名，即旧配置里有、新配置里没有。 */
-  removed: string[] // 删除服务
-  /** 前后都存在，但配置内容发生变化的服务名。 */
-  changed: string[] // 配置已变更的服务
-  /** 前后都存在，且配置未变化的服务名。 */
-  unchanged: string[] // 保持不变的服务
+  added: string[] // 重启后新增、重启前不存在的服务名
+  removed: string[] // 被移除的服务名，即旧配置里有、新配置里没有
+  changed: string[] // 前后都存在，但配置内容发生变化的服务名
+  unchanged: string[] // 前后都存在，且配置未变化的服务名
 }
 
 export class McpRegistry {
@@ -356,7 +355,7 @@ export function emptyRegistry(): McpRegistry {
  *  从而保证连接结果的结构始终一致。 */
 export interface ConnectResult {
   server: RegisteredServer // 连接后的服务实例与状态
-  tools: ReadonlyArray<{ name: string; description?: string; inputSchema: Record<string, unknown> }> // 服务枚举到的工具
+  tools: ReadonlyArray<{ name: string; description?: string; inputSchema: Record<string, unknown> }> // 服务枚举到的工具列表
   resources: ReadonlyArray<McpResourceEntry> // 服务枚举到的资源
 }
 

@@ -41,43 +41,24 @@ import type {
 } from './types.js'
 
 export interface LoadOptions {
-  /** 当前工作目录，用于查找项目本地插件。 */
-  cwd: string
-  /** 是否完全跳过插件加载。
-   *  对应启动参数 `--no-plugins`，启用后返回空注册表。 */
-  disabled?: boolean
+  cwd: string // 当前工作目录，用于查找项目本地插件
+  disabled?: boolean // 是否完全跳过插件加载；对应启动参数 `--no-plugins`
 }
 
 export interface LoadResult {
-  /** 已加载完成的插件注册表。 */
-  registry: PluginRegistry
-  /** 每个插件解析后的贡献路径信息。
-   *  工作流 B（skill / agent / mcp 加载整合）会从这里读取并合并插件内容，
-   *  键为插件 id。 */
-  contributions: Map<string, ResolvedContributions>
+  registry: PluginRegistry // 已加载完成的插件注册表
+  contributions: Map<string, ResolvedContributions> // 每个插件解析后的贡献路径信息，键为插件 id
 }
 
 /** 插件 manifest 中贡献项的解析结果，所有相对路径都会基于 `rootDir`
  *  展开。`mcpServers` 和 `hooks` 使用 `path` / `inline` 区分，
  *  对应 manifest 允许“指向文件”或“直接内联配置”两种写法。 */
 export interface ResolvedContributions {
-  /** 插件 skills 目录的绝对路径（如果存在）。
-   *  其下每个子目录都应符合现有 `<name>/SKILL.md` 结构，这样 skill
-   *  加载器无需改动就能直接扫描。 */
-  skillsDir?: string
-  /** 插件 sub-agent `.md` 文件目录的绝对路径。 */
-  agentsDir?: string
-  /** 插件 slash command `.md` 文件目录的绝对路径。 */
-  commandsDir?: string
-  /** mcpServers 贡献内容。
-   *  可以是 JSON 文件路径（结构形如 `{ mcpServers: { ... } }`），
-   *  也可以是直接内联的记录对象（与 ~/.x-code/config.json 中
-   *  `mcpServers` 的形状一致）。 */
-  mcpServers?: { kind: 'path'; path: string } | { kind: 'inline'; data: InlineMcpServers }
-  /** hooks 贡献内容。
-   *  可以是 hooks.json 路径，也可以是内联对象。schema 校验位于
-   *  packages/core/src/hooks（工作流 C）。 */
-  hooks?: { kind: 'path'; path: string } | { kind: 'inline'; data: InlineHookConfig }
+  skillsDir?: string // 插件 skills 目录的绝对路径（如果存在）
+  agentsDir?: string // 插件 sub-agent `.md` 文件目录的绝对路径
+  commandsDir?: string // 插件 slash command `.md` 文件目录的绝对路径
+  mcpServers?: { kind: 'path'; path: string } | { kind: 'inline'; data: InlineMcpServers } // mcpServers 贡献内容
+  hooks?: { kind: 'path'; path: string } | { kind: 'inline'; data: InlineHookConfig } // hooks 贡献内容
 }
 
 /** 按当前启动上下文加载所有可见插件。 */
@@ -137,24 +118,15 @@ export async function loadAllPlugins(opts: LoadOptions): Promise<LoadResult> {
 }
 
 interface LoadOneArgs {
-  /** 插件根目录。 */
-  rootDir: string
-  /** manifest 尚未解析成功前使用的兜底插件 id。 */
-  fallbackId: string
-  /** 插件所属 marketplace 名称。 */
-  marketplace: string
-  /** 插件所属作用域。 */
-  scope: PluginScope
-  /** 插件来源；项目内插件时可能为空。 */
-  source: PluginSource | undefined
-  /** 已加载好的启用状态快照。 */
-  enableState: EnableState
-  /** 成功加载出的插件集合。 */
-  plugins: LoadedPlugin[]
-  /** 失败信息收集数组。 */
-  errors: PluginLoadError[]
-  /** 每个插件的贡献解析结果映射。 */
-  contributions: Map<string, ResolvedContributions>
+  rootDir: string // 插件根目录
+  fallbackId: string // manifest 尚未解析成功前使用的兜底插件 id
+  marketplace: string // 插件所属 marketplace 名称
+  scope: PluginScope // 插件所属作用域
+  source: PluginSource | undefined // 插件来源；项目内插件时可能为空
+  enableState: EnableState // 已加载好的启用状态快照
+  plugins: LoadedPlugin[] // 成功加载出的插件集合
+  errors: PluginLoadError[] // 失败信息收集数组
+  contributions: Map<string, ResolvedContributions> // 每个插件的贡献解析结果映射
 }
 
 /** 加载单个插件，并把成功结果或错误写入共享收集容器。 */

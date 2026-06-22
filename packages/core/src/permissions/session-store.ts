@@ -607,6 +607,8 @@ function getPermissionsPath(cwd: string): string {
 
 // ─── 内存存储 ───────────────────────────────────────────────────────────
 
+/** 会话级权限规则存储。
+ *  负责在内存中保存本次会话已批准的规则，并提供匹配判断。 */
 class SessionPermissionStore {
   private rules: AllowRule[] = []
 

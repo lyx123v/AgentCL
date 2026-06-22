@@ -43,16 +43,41 @@ import type { LoadResult, ResolvedContributions } from './loader.js'
 import type { InlineMcpServers, LoadedPlugin } from './types.js'
 import { getPluginUserConfigEnv } from './user-config.js'
 
+export interface PluginDirContribution {
+  dir: string // 贡献目录的绝对路径
+  pluginId: string // 该目录所属插件 id
+}
+
+export interface PluginCommandContribution extends PluginDirContribution {
+  pluginRoot: string // 插件根目录，供命令执行时替换 `${CLAUDE_PLUGIN_ROOT}`
+}
+
+export interface PluginHookSummary {
+  pluginId: string // 插件 id
+  events: string[] // 插件声明的 hook 事件名列表
+}
+
+export interface PluginMcpCollision {
+  name: string // 发生冲突的 MCP 服务名
+  droppedFrom: string // 被丢弃的插件 id
+  keptFrom: string // 最终保留的插件 id
+}
+
+export interface PluginIntegrationError {
+  pluginId: string // 产生错误的插件 id
+  message: string // 错误详情
+}
+
 export interface PluginIntegrationOutput {
   /** 需要额外纳入 skill 加载器扫描的目录列表，并附带所属插件 id。
    *  仅包含已启用插件。 */
-  skillsDirs: Array<{ dir: string; pluginId: string }>
+  skillsDirs: PluginDirContribution[]
   /** 需要额外扫描的 sub-agent `.md` 目录列表。 */
-  agentsDirs: Array<{ dir: string; pluginId: string }>
+  agentsDirs: PluginDirContribution[]
   /** 需要额外扫描的 slash command `*.md` 目录列表。
    *  每项都携带所属插件 rootDir，方便命令体在激活时替换
    *  `${CLAUDE_PLUGIN_ROOT}`。 */
-  commandsDirs: Array<{ dir: string; pluginId: string; pluginRoot: string }>
+  commandsDirs: PluginCommandContribution[]
   /** 所有已启用插件合并后的 `mcpServers` 配置。
    *  名称冲突采用“先到先得”，被丢弃者记录到 `mcpCollisions`。 */
   mcpServers: Record<string, McpServerConfig>
@@ -65,15 +90,15 @@ export interface PluginIntegrationOutput {
   hookBus: HookBus
   /** 每个插件声明了哪些 hook 事件的摘要信息。
    *  供 `/plugin doctor` 和 `/plugin info` 界面使用。 */
-  pluginHooks: Array<{ pluginId: string; events: string[] }>
+  pluginHooks: PluginHookSummary[]
   /** 因与更早插件发生同名冲突而被丢弃的 mcpServers 条目。
    *  结构为 `{ name, droppedFrom, keptFrom }`。 */
-  mcpCollisions: Array<{ name: string; droppedFrom: string; keptFrom: string }>
+  mcpCollisions: PluginMcpCollision[]
   /** 各插件在 mcpServers 读取或解析阶段产生的错误。
    *  这类错误不会阻塞启动，而是交由 `/plugin doctor` 展示。 */
-  mcpErrors: Array<{ pluginId: string; message: string }>
+  mcpErrors: PluginIntegrationError[]
   /** 各插件在 hooks 读取或解析阶段产生的错误。 */
-  hookErrors: Array<{ pluginId: string; message: string }>
+  hookErrors: PluginIntegrationError[]
 }
 
 /** 基于已加载插件结果，构建各子系统可直接消费的整合输出。 */

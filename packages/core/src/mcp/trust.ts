@@ -16,6 +16,7 @@ import path from 'node:path'
 
 import { userXcodeDir } from '../utils.js'
 
+/** 返回项目级信任列表持久化文件路径。 */
 function trustedFile(): string {
   return path.join(userXcodeDir(), 'trusted-projects.json')
 }
@@ -27,6 +28,12 @@ interface TrustedEntry {
 
 interface TrustedStore {
   trusted: TrustedEntry[] // 已信任项目列表
+}
+
+export interface ServerPreviewConfig {
+  command?: string // stdio 服务启动命令
+  args?: string[] // stdio 服务命令参数
+  url?: string // HTTP 服务地址
 }
 
 /** 规范化路径，保证跨平台比较稳定。
@@ -116,7 +123,7 @@ export async function promptForTrust(
 /** 构造信任弹窗里每个服务对应的一行预览文本。
  *  stdio 服务展示完整命令与参数，HTTP 服务展示 URL。
  *  这里故意不做截断，因为用户需要看到完整信息才能做出可信判断。 */
-export function buildServerPreview(config: { command?: string; args?: string[]; url?: string }): string {
+export function buildServerPreview(config: ServerPreviewConfig): string {
   if (config.url) return config.url
   if (config.command) {
     const parts = [config.command, ...(config.args ?? [])]

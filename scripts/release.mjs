@@ -9,7 +9,7 @@ const currentVersion = JSON.parse(readFileSync(resolve(rootDir, packages[0]), 'u
 
 function run(cmd, opts) {
   console.log(`\n> ${cmd}`)
-  // Use shell: true for cross-platform compatibility (Windows needs this for some commands)
+  // 使用shell:true实现跨平台兼容性（Windows需要此命令）
   return execSync(cmd, { stdio: 'inherit', cwd: rootDir, shell: true, ...opts })
 }
 
@@ -136,7 +136,7 @@ const changelogPath = resolve(rootDir, 'CHANGELOG.md')
 let existingChangelog = ''
 try {
   existingChangelog = readFileSync(changelogPath, 'utf-8')
-} catch {}
+} catch { }
 writeFileSync(changelogPath, changelog + existingChangelog)
 console.log('  CHANGELOG.md updated')
 

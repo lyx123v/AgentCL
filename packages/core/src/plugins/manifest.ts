@@ -82,10 +82,8 @@ const manifestSchema = z.object({
 // ── Manifest 探测 ──────────────────────────────────────────────────────
 
 export interface ManifestDiscovery {
-  /** manifest 文件的绝对路径。 */
-  manifestPath: string
-  /** 当前识别到的 manifest 格式。 */
-  format: ManifestFormat
+  manifestPath: string // manifest 文件的绝对路径
+  format: ManifestFormat // 当前识别到的 manifest 格式
 }
 
 /** 在插件根目录中探测 manifest 文件，并返回优先级最高的命中结果。
@@ -111,8 +109,7 @@ export async function discoverManifest(rootDir: string): Promise<ManifestDiscove
 export class ManifestParseError extends Error {
   constructor(
     message: string,
-    /** 触发错误的 manifest 文件路径。 */
-    public readonly manifestPath: string,
+    public readonly manifestPath: string, // 触发错误的 manifest 文件路径
   ) {
     super(message)
     this.name = 'ManifestParseError'
